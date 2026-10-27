@@ -29,6 +29,19 @@ need this plugin.
 
 - Plugin settings for the Forgejo URL and an access token (stored as a Paperclip secret).
 - A dashboard widget that checks the connection and shows the Forgejo version and user.
+- A Forgejo tab on each project that lists your repositories and gives you the command to add one
+  as a project workspace. Plugins cannot create workspaces themselves.
+
+## Forgejo access token
+
+Create the token in Forgejo under Settings, Applications, with these scopes:
+
+| Scope | Used for |
+| --- | --- |
+| `read:user` | Checking the connection and showing who the token belongs to |
+| `read:repository` | Listing repositories in the project tab |
+
+Forgejo cannot change the scopes of an existing token, so create a new one if a scope is missing.
 
 ## Development
 
