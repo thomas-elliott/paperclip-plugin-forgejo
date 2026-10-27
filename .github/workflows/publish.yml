@@ -1,0 +1,43 @@
+name: Publish to npm
+
+# Publishes when a GitHub release is published. The release tag must be "v" plus the version in
+# package.json, for example v0.2.0.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  # npm trusted publishing: GitHub issues an OIDC token that npm accepts instead of an npm token.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Reads the pnpm version from packageManager in package.json.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install --global npm@11
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check the release tag matches package.json
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package.json version ($expected)."
+            exit 1
+          fi
+
+      # prepublishOnly runs the type check, tests and build before publishing.
+      - run: npm publish
