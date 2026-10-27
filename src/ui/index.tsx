@@ -1,25 +1,84 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import {
   copyTextToClipboard,
+  KeyValueList,
+  Spinner,
+  StatusBadge,
   usePluginData,
   type PluginDetailTabProps,
   type PluginWidgetProps,
 } from "@paperclipai/plugin-sdk/ui";
 import type { ConnectionStatus, ForgejoRepository, ProjectRepositories } from "../worker.js";
 
+// Paperclip's theme is Tailwind v4 CSS variables on the host page. Plugins read the variables
+// rather than Tailwind classes, because the host stylesheet only contains classes it uses itself.
+const space = (steps: number) => `calc(var(--spacing) * ${steps})`;
+
+const styles = {
+  stack: { display: "grid", gap: space(4) },
+  field: { display: "grid", gap: space(2), maxWidth: "40rem" },
+  heading: { margin: 0, fontSize: "var(--text-sm)", fontWeight: "var(--font-weight-semibold)" },
+  muted: { margin: 0, fontSize: "var(--text-sm)", color: "var(--muted-foreground)" },
+  label: { fontSize: "var(--text-sm)", fontWeight: "var(--font-weight-medium)" },
+  select: {
+    padding: `${space(2)} ${space(3)}`,
+    fontSize: "var(--text-sm)",
+    color: "var(--foreground)",
+    background: "var(--background)",
+    border: "1px solid var(--input)",
+    borderRadius: "var(--radius-md)",
+  },
+  command: {
+    margin: 0,
+    padding: space(3),
+    fontFamily: "var(--font-mono)",
+    fontSize: "var(--text-xs)",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-all",
+    background: "var(--muted)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-md)",
+  },
+  button: {
+    justifySelf: "start",
+    padding: `${space(2)} ${space(3)}`,
+    fontSize: "var(--text-sm)",
+    fontWeight: "var(--font-weight-medium)",
+    color: "var(--primary-foreground)",
+    background: "var(--primary)",
+    border: "none",
+    borderRadius: "var(--radius-md)",
+    cursor: "pointer",
+  },
+  code: { fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" },
+} satisfies Record<string, CSSProperties>;
+
+function NotConnected({ reason }: { reason?: string }) {
+  return (
+    <div style={styles.stack}>
+      <StatusBadge status="warning" label="Not connected" />
+      {reason && <p style={styles.muted}>{reason}</p>}
+    </div>
+  );
+}
+
 export function DashboardWidget({ context }: PluginWidgetProps) {
   const { data, loading, error } = usePluginData<ConnectionStatus>("connection", {
     companyId: context.companyId,
   });
 
-  if (loading) return <div>Checking Forgejo connection…</div>;
-  if (error) return <div>Could not check Forgejo: {error.message}</div>;
-  if (!data?.connected) return <div>Forgejo is not connected. {data?.reason}</div>;
+  if (loading) return <Spinner size="sm" label="Checking Forgejo connection" />;
+  if (error) return <NotConnected reason={`Could not check Forgejo: ${error.message}`} />;
+  if (!data?.connected) return <NotConnected reason={data?.reason} />;
 
   return (
-    <div>
-      Connected to Forgejo {data.forgejoVersion} as <strong>{data.username}</strong>
-    </div>
+    <KeyValueList
+      pairs={[
+        { label: "Status", value: <StatusBadge status="ok" label="Connected" /> },
+        { label: "Forgejo version", value: data.forgejoVersion },
+        { label: "Signed in as", value: data.username },
+      ]}
+    />
   );
 }
 
@@ -42,9 +101,9 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
   const [selected, setSelected] = useState("");
   const [copied, setCopied] = useState(false);
 
-  if (loading) return <div>Loading Forgejo repositories…</div>;
-  if (error) return <div>Could not load Forgejo repositories: {error.message}</div>;
-  if (!data?.configured) return <div>Forgejo is not connected. {data?.reason}</div>;
+  if (loading) return <Spinner label="Loading Forgejo repositories" />;
+  if (error) return <NotConnected reason={`Could not load Forgejo repositories: ${error.message}`} />;
+  if (!data?.configured) return <NotConnected reason={data?.reason} />;
 
   const repository = data.repositories.find((repo) => repo.fullName === selected);
   const command = repository ? workspaceCommand(projectId, repository) : "";
@@ -55,24 +114,26 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
   }
 
   return (
-    <div style={{ display: "grid", gap: "1rem" }}>
+    <div style={styles.stack}>
       {data.linkedWorkspaces.length > 0 && (
-        <section>
-          <h3>Forgejo workspaces in this project</h3>
-          <ul>
-            {data.linkedWorkspaces.map((workspace) => (
-              <li key={workspace.repoUrl}>
-                {workspace.name}: <code>{workspace.repoUrl}</code>
-              </li>
-            ))}
-          </ul>
+        <section style={styles.stack}>
+          <h3 style={styles.heading}>Forgejo workspaces in this project</h3>
+          <KeyValueList
+            pairs={data.linkedWorkspaces.map((workspace) => ({
+              label: workspace.name,
+              value: <code style={styles.code}>{workspace.repoUrl}</code>,
+            }))}
+          />
         </section>
       )}
 
-      <section style={{ display: "grid", gap: "0.5rem" }}>
-        <label htmlFor="forgejo-repository">Add a Forgejo repository as a workspace</label>
+      <section style={styles.field}>
+        <label htmlFor="forgejo-repository" style={styles.label}>
+          Add a Forgejo repository as a workspace
+        </label>
         <select
           id="forgejo-repository"
+          style={styles.select}
           value={selected}
           onChange={(event) => {
             setSelected(event.target.value);
@@ -90,9 +151,9 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
 
         {repository && (
           <>
-            <p>Paperclip does not let plugins create workspaces. Run this command to add it:</p>
-            <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{command}</pre>
-            <button type="button" onClick={copyCommand}>
+            <p style={styles.muted}>Paperclip does not let plugins create workspaces. Run this command to add it:</p>
+            <pre style={styles.command}>{command}</pre>
+            <button type="button" style={styles.button} onClick={copyCommand}>
               {copied ? "Copied" : "Copy command"}
             </button>
           </>
