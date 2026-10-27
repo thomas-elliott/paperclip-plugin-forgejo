@@ -1,55 +1,81 @@
-# Paperclip Forgejo plugin
+# Forgejo for Paperclip
 
-A [Paperclip](https://paperclip.ing) plugin that connects a Paperclip instance to a self-hosted
-Forgejo server, so agents can work with Forgejo the way they work with GitHub.
+This plugin connects [Paperclip](https://paperclip.ing) to your own [Forgejo](https://forgejo.org)
+server. It checks the connection, lists your Forgejo repositories, and helps you add them to
+Paperclip projects.
 
-## What a plugin can and cannot do
+## What it does
 
-Paperclip's GitHub support is built into the core server, not into a plugin. The repository
-picker, GitHub connections and pull-request review threads all call `github.com` directly
-(see `server/src/services/project-repositories.ts` in the Paperclip repo). A plugin cannot
-swap those out.
+- A dashboard widget shows whether Paperclip can reach Forgejo, the Forgejo version, and which user
+  the token belongs to.
+- A Forgejo tab on each project lists your repositories and marks the ones the project already
+  uses. Pick a repository and the tab gives you the command that adds it as a workspace.
+- Your Forgejo access token is stored as a Paperclip secret, not in plain settings.
 
-A plugin can add a Forgejo integration that sits beside them, using these extension points:
+## Limitations
+
+- The plugin cannot add a workspace itself, because Paperclip does not let plugins create
+  workspaces. You copy the command from the Forgejo tab and run it.
+- Paperclip's built-in GitHub features, such as its repository picker and pull-request review
+  threads, only work with github.com. This plugin adds Forgejo beside them and cannot replace them.
+- Agents cannot yet open pull requests or read issues through the plugin.
+- For a private repository, the machine that runs your agents needs its own git credentials for
+  Forgejo, such as an SSH key or a credential helper with an access token. Paperclip only supplies
+  credentials for github.com. Without them the workspace is created but the clone fails.
+
+## Install
+
+1. In Forgejo, go to Settings, Applications, and create an access token with these scopes:
+
+   | Scope | Used for |
+   | --- | --- |
+   | `read:user` | Checking the connection |
+   | `read:repository` | Listing your repositories |
+
+2. Install the plugin into Paperclip:
+
+   ```bash
+   npx paperclipai plugin install @thomas-elliott/paperclip-plugin-forgejo --api-base https://your-paperclip.example.com
+   ```
+
+3. In Paperclip, open the Forgejo plugin's settings. Enter your Forgejo address, add the token as a
+   secret, and save.
+4. Check the Forgejo widget on the dashboard. It should show your Forgejo version and user.
+
+Forgejo cannot change an existing token's scopes. If a scope is missing, create a new token and
+update the secret in Paperclip.
+
+### Upgrading
+
+If a new version of the plugin needs more permissions, Paperclip refuses the upgrade. Uninstall the
+plugin and install it again. Your settings are kept.
+
+## Add a Forgejo repository to a project
+
+1. Open the project in Paperclip and go to the Forgejo tab.
+2. Choose a repository and select Copy command.
+3. Run the command in a terminal.
+4. Reload the tab. The repository now appears under the project's Forgejo workspaces.
+
+## Technical details
+
+Paperclip's GitHub support is built into its core server, not into a plugin, so a plugin cannot swap
+it out. The plugin builds on these extension points instead, and the later rows are candidates for
+future features:
 
 | Need | Plugin feature | Capability |
 | --- | --- | --- |
 | Call the Forgejo API | `ctx.http.fetch` | `http.outbound` |
 | Keep the access token out of config | `format: "secret-ref"` field, `ctx.secrets.resolve` | `secrets.read-ref` |
+| Read project workspaces | `ctx.projects` | `projects.read`, `project.workspaces.read` |
+| Settings, dashboard and project tab | UI slots | `ui.*.register` |
 | Let agents open PRs, comment, read issues | `ctx.tools.register` | `agent.tools.register` |
 | React to Forgejo events | webhooks | `webhooks.receive` |
 | Show live status of pasted Forgejo PR and issue links | `objectReferences` | `external.objects.detect`, `external.objects.read` |
 | Sync Forgejo issues into Paperclip | `ctx.issues` | `issues.create`, `issues.update` |
-| Settings and status pages | UI slots | `ui.*.register` |
 
-Cloning a Forgejo repository into an agent workspace works with an ordinary git URL; it does not
-need this plugin.
-
-## What works now
-
-- Plugin settings for the Forgejo URL and an access token (stored as a Paperclip secret).
-- A dashboard widget that checks the connection and shows the Forgejo version and user.
-- A Forgejo tab on each project that lists your repositories and gives you the command to add one
-  as a project workspace. Plugins cannot create workspaces themselves.
-
-## Forgejo access token
-
-Create the token in Forgejo under Settings, Applications, with these scopes:
-
-| Scope | Used for |
-| --- | --- |
-| `read:user` | Checking the connection and showing who the token belongs to |
-| `read:repository` | Listing repositories in the project tab |
-
-Forgejo cannot change the scopes of an existing token, so create a new one if a scope is missing.
-
-## Cloning private repositories
-
-Paperclip clones a workspace's repository with plain `git` on the machine that runs the agent. It
-only supplies credentials for github.com, and a plugin cannot supply them. For a private Forgejo
-repository, set up git credentials for your Forgejo server on that machine first, such as a
-credential helper with an access token or an SSH key. Without them the workspace is created but
-the clone fails.
+The project tab recognises a workspace by any address Forgejo gives the repository: the HTTPS clone
+address, the SSH address or the web address.
 
 ## Development
 
@@ -70,8 +96,8 @@ npx paperclipai plugin install "$PWD"
 npx paperclipai plugin inspect paperclip-plugin-forgejo   # the plugin ID, not the npm name
 ```
 
-A local-path install runs this folder's code with full trust. To deploy, publish the package
-to npm (or your own registry) and install it by name.
+A local-path install runs this folder's code with full trust. Paperclip only rereads the manifest
+on an upgrade, so run `npx paperclipai plugin upgrade paperclip-plugin-forgejo` after changing it.
 
 ## References
 
