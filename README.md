@@ -43,6 +43,14 @@ Create the token in Forgejo under Settings, Applications, with these scopes:
 
 Forgejo cannot change the scopes of an existing token, so create a new one if a scope is missing.
 
+## Cloning private repositories
+
+Paperclip clones a workspace's repository with plain `git` on the machine that runs the agent. It
+only supplies credentials for github.com, and a plugin cannot supply them. For a private Forgejo
+repository, set up git credentials for your Forgejo server on that machine first, such as a
+credential helper with an access token or an SSH key. Without them the workspace is created but
+the clone fails.
+
 ## Development
 
 Needs Node.js 24.11 or later and pnpm.

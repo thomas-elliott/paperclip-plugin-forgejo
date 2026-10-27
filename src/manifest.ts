@@ -1,9 +1,11 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
+// Paperclip shows the manifest version, so take it from package.json rather than keeping two copies.
+import packageJson from "../package.json" with { type: "json" };
 
 const manifest: PaperclipPluginManifestV1 = {
   id: "paperclip-plugin-forgejo",
   apiVersion: 1,
-  version: "0.1.0",
+  version: packageJson.version,
   displayName: "Forgejo",
   description: "Connect a Paperclip instance to a self-hosted Forgejo server",
   author: "Thomas Elliott",
