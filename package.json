@@ -1,0 +1,47 @@
+{
+  "name": "@thomas-elliott/paperclip-plugin-forgejo",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Connect a Paperclip instance to a self-hosted Forgejo server",
+  "scripts": {
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
+  },
+  "keywords": [
+    "paperclip",
+    "plugin",
+    "connector",
+    "forgejo"
+  ],
+  "author": "Thomas Elliott",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thomas-elliott/paperclip-plugin-forgejo.git"
+  },
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "2026.1023.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.8",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
