@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PluginWorkspace, Project } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
@@ -50,5 +51,31 @@ describe("connection check", () => {
     const status = await harness.getData("connection", { companyId: "co-1" });
 
     expect(status).toEqual({ connected: false, reason: expect.stringContaining("rejected the access token") });
+  });
+});
+
+describe("project repositories", () => {
+  it("lists every page of repositories and only the workspaces on this Forgejo server", async () => {
+    const repo = (n: number) => ({ full_name: `me/repo-${n}`, clone_url: `https://git.example.com/me/repo-${n}.git`, private: false });
+    stubForgejo({
+      "https://git.example.com/api/v1/user/repos?limit=50&page=1": Response.json(Array.from({ length: 50 }, (_, n) => repo(n))),
+      "https://git.example.com/api/v1/user/repos?limit=50&page=2": Response.json([repo(50)]),
+    });
+    const harness = await setUp(config);
+    harness.seed({
+      projects: [{ id: "project-1", companyId: "co-1" } as Project],
+      projectWorkspaces: [
+        { id: "ws-1", projectId: "project-1", name: "app", repoUrl: "https://git.example.com/me/app.git" } as PluginWorkspace,
+        { id: "ws-2", projectId: "project-1", name: "docs", repoUrl: "https://github.com/me/docs.git" } as PluginWorkspace,
+      ],
+    });
+
+    const result = await harness.getData("projectRepositories", { companyId: "co-1", projectId: "project-1" });
+
+    expect(result).toMatchObject({
+      configured: true,
+      linkedWorkspaces: [{ name: "app", repoUrl: "https://git.example.com/me/app.git" }],
+    });
+    expect((result as { repositories: unknown[] }).repositories).toHaveLength(51);
   });
 });

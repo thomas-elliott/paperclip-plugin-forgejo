@@ -11,7 +11,10 @@ const manifest: PaperclipPluginManifestV1 = {
   capabilities: [
     "http.outbound",
     "secrets.read-ref",
+    "projects.read",
+    "project.workspaces.read",
     "ui.dashboardWidget.register",
+    "ui.detailTab.register",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -42,6 +45,13 @@ const manifest: PaperclipPluginManifestV1 = {
         id: "forgejo-connection",
         displayName: "Forgejo connection",
         exportName: "DashboardWidget",
+      },
+      {
+        type: "detailTab",
+        id: "forgejo-project",
+        displayName: "Forgejo",
+        exportName: "ProjectRepositoryTab",
+        entityTypes: ["project"],
       },
     ],
   },
