@@ -99,7 +99,7 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
     projectId,
   });
   const [selected, setSelected] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   if (loading) return <Spinner label="Loading Forgejo repositories" />;
   if (error) return <NotConnected reason={`Could not load Forgejo repositories: ${error.message}`} />;
@@ -109,8 +109,12 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
   const command = repository ? workspaceCommand(projectId, repository) : "";
 
   async function copyCommand() {
-    await copyTextToClipboard(command);
-    setCopied(true);
+    try {
+      await copyTextToClipboard(command);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
   }
 
   return (
@@ -137,14 +141,15 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
           value={selected}
           onChange={(event) => {
             setSelected(event.target.value);
-            setCopied(false);
+            setCopyState("idle");
           }}
         >
           <option value="">Choose a repository…</option>
           {data.repositories.map((repo) => (
-            <option key={repo.fullName} value={repo.fullName}>
+            <option key={repo.fullName} value={repo.fullName} disabled={repo.linked}>
               {repo.fullName}
               {repo.private ? " (private)" : ""}
+              {repo.linked ? " (already a workspace)" : ""}
             </option>
           ))}
         </select>
@@ -154,8 +159,13 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
             <p style={styles.muted}>Paperclip does not let plugins create workspaces. Run this command to add it:</p>
             <pre style={styles.command}>{command}</pre>
             <button type="button" style={styles.button} onClick={copyCommand}>
-              {copied ? "Copied" : "Copy command"}
+              {copyState === "copied" ? "Copied" : "Copy command"}
             </button>
+            {copyState === "failed" && (
+              <p role="alert" style={styles.muted}>
+                Could not copy. Select the command above and copy it yourself.
+              </p>
+            )}
           </>
         )}
       </section>
