@@ -33,13 +33,21 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
   threads, only work with github.com. This plugin adds Forgejo beside them and cannot replace them.
 - Link status is an experimental Paperclip feature, off by default for GitHub links too. See
   [Show the status of Forgejo links](#show-the-status-of-forgejo-links).
+- When a Forgejo link already shown elsewhere is added to another issue or comment, Paperclip shows
+  its address instead of its title for up to five minutes, until its next refresh.
 - Pull requests that agents record on a task show as a plain title, not as Paperclip's GitHub
   pull-request card, which only recognises github.com.
 - Paperclip does not yet put plugin tools in an agent's tool list. Agents call the Forgejo tools
   through Paperclip's API instead, as the Forgejo tools skill tells them, so each agent that uses
   Forgejo needs that skill. The tools only work on a task that belongs to a project.
+- A failed tool call still returns HTTP 200 from Paperclip's API, with the reason in `result.error`.
 - Agents act in Forgejo as the user who owns the access token.
 - Reopening an imported issue in Paperclip does not reopen it in Forgejo.
+- When a webhook delivery's secret does not match, Paperclip answers Forgejo with HTTP 502, so
+  Forgejo shows a server error rather than an authentication error. Paperclip records the delivery
+  as failed with the real reason.
+- Saving the settings logs a "strict mode" warning in Paperclip's server log for each secret
+  setting, such as `token`. It is harmless.
 - For a private repository, the machine that runs your agents needs its own git credentials for
   Forgejo, such as an SSH key or a credential helper with an access token. Paperclip only supplies
   credentials for github.com. Without them the workspace is created but the clone fails.
