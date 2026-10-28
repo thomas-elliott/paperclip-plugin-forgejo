@@ -82,7 +82,7 @@ const tools: PluginToolDeclaration[] = [
     name: "create_pull_request",
     displayName: "Open a Forgejo pull request",
     description:
-      "Opens a pull request from a pushed branch. Push the branch first. For a branch in a fork, give head as forkowner:branch.",
+      "Opens a pull request from a pushed branch and posts its link on your task. Push the branch first. For a branch in a fork, give head as forkowner:branch. linkedTask in the result is null when the link could not be posted; then add it to your task yourself.",
     parametersSchema: {
       type: "object",
       required: ["head", "title"],
@@ -195,6 +195,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "issues.read",
     "issues.create",
     "issues.update",
+    "issue.comments.create",
     "plugin.state.read",
     "plugin.state.write",
     "events.subscribe",

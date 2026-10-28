@@ -94,7 +94,13 @@ function lineInDiff(fileDiff: string, line: number, side: "new" | "old"): boolea
   return false;
 }
 
-type Tool = (call: { ctx: PluginContext; forgejo: Forgejo; repository: () => Promise<string>; input: Input }) => Promise<unknown>;
+type Tool = (call: {
+  ctx: PluginContext;
+  runCtx: ToolRunContext;
+  forgejo: Forgejo;
+  repository: () => Promise<string>;
+  input: Input;
+}) => Promise<unknown>;
 
 // Accepts "owner/repo" or a full Forgejo address. Without one, uses the project's only Forgejo repository.
 async function resolveRepository(ctx: PluginContext, forgejo: Forgejo, runCtx: ToolRunContext, given: string | undefined) {
@@ -111,6 +117,17 @@ async function resolveRepository(ctx: PluginContext, forgejo: Forgejo, runCtx: T
       ? "This project uses no Forgejo repository. Pass repository as owner/repo."
       : `This project uses several Forgejo repositories (${names.join(", ")}). Pass repository as owner/repo.`,
   );
+}
+
+// Paperclip's pull request card only recognises github.com, so a comment with the link stands in for
+// it: link status then shows the pull request's live state on the task. Returns the task's identifier,
+// or null when the run has no task to link to.
+async function linkToTask(ctx: PluginContext, runCtx: ToolRunContext, pull: ForgejoPullRequestJson): Promise<string | null> {
+  const assigned = await ctx.issues.list({ companyId: runCtx.companyId, projectId: runCtx.projectId, assigneeAgentId: runCtx.agentId });
+  const task = assigned.find((issue) => issue.checkoutRunId === runCtx.runId || issue.executionRunId === runCtx.runId);
+  if (!task) return null;
+  await ctx.issues.createComment(task.id, `Opened pull request ${pull.html_url}`, runCtx.companyId);
+  return task.identifier ?? task.id;
 }
 
 // Agents get a compact view of each item rather than Forgejo's full JSON.
@@ -191,14 +208,21 @@ const tools: Record<string, Tool> = {
     return issueSummary(issue);
   },
 
-  async create_pull_request({ ctx, forgejo, repository, input }) {
+  async create_pull_request({ ctx, runCtx, forgejo, repository, input }) {
     const name = await repository();
     const base = input.base ?? (await forgejoJson<ForgejoRepositoryJson>(ctx, forgejo, `/repos/${name}`)).default_branch;
     const pull = await forgejoJson<ForgejoPullRequestJson>(ctx, forgejo, `/repos/${name}/pulls`, {
       method: "POST",
       body: { head: input.head, base, title: input.title, body: input.body ?? "" },
     });
-    return pullRequestSummary(pull);
+    // The pull request is open by now, so a failure to link it must not fail the tool.
+    let linkedTask: string | null = null;
+    try {
+      linkedTask = await linkToTask(ctx, runCtx, pull);
+    } catch (error) {
+      ctx.logger.warn("Could not link a pull request to its task", { url: pull.html_url, error: errorMessage(error) });
+    }
+    return { ...pullRequestSummary(pull), linkedTask };
   },
 
   async get_pull_request({ ctx, forgejo, repository, input }) {
@@ -377,7 +401,7 @@ export function registerAgentTools(ctx: PluginContext) {
           return { error: "number must be a whole number above zero." };
         }
         const repository = () => resolveRepository(ctx, forgejo, runCtx, input.repository);
-        const result = await tool({ ctx, forgejo, repository, input });
+        const result = await tool({ ctx, runCtx, forgejo, repository, input });
         return { content: JSON.stringify(result, null, 2), data: result };
       } catch (error) {
         return { error: errorMessage(error) };
