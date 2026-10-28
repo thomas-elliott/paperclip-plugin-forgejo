@@ -135,6 +135,14 @@ describe("link status", () => {
     expect(await resolve("pull_request", "me/app#2")).toMatchObject({ ok: true, snapshot: { statusLabel: "Merged", statusCategory: "succeeded" } });
   });
 
+  it("shows a merged pull request linked by its issue address as merged", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.addIssue("me/app", { number: 2, isPull: true, merged: true, state: "closed" });
+    await setUp(config, []);
+
+    expect(await resolve("issue", "me/app#2")).toMatchObject({ ok: true, snapshot: { statusLabel: "Merged", statusCategory: "succeeded" } });
+  });
+
   it("reads a proxy's HTML error page by its status", async () => {
     const forgejo = new FakeForgejo(["me/app"]);
     forgejo.override = (path) => {
@@ -257,6 +265,17 @@ describe("agent tools", () => {
     const result = await harness.executeTool<ToolResult>("get_issue", { number: 4 }, runCtx);
 
     expect(result.data).toMatchObject({ title: "Over SSH" });
+  });
+
+  it("accepts a repository given as any address of it on the Forgejo server", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.addIssue("me/app", { number: 4, title: "Fix login" });
+    const harness = await setUp(config, ["me/app"]);
+
+    for (const repository of ["me/app", `${BASE_URL}/me/app`, "https://Git.Example.com/me/app.git", "git@git.example.com:me/app.git"]) {
+      const result = await harness.executeTool<ToolResult>("get_issue", { repository, number: 4 }, runCtx);
+      expect(result.data, repository).toMatchObject({ title: "Fix login" });
+    }
   });
 
   describe("opening a pull request", () => {
@@ -734,6 +753,23 @@ describe("comment copy", () => {
 
     expect(copied()).toEqual([expect.stringContaining("Hello")]);
   });
+
+  it("copies a comment the webhook missed, though a newer one came through the webhook first", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.addIssue("me/app", { number: 1 });
+    const harness = await setUp(config, ["me/app"]);
+    await harness.runJob("sync-issues");
+    const copied = copiedComments(harness);
+
+    forgejo.addComment("me/app", 1, "Missed by the webhook");
+    forgejo.addComment("me/app", 1, "Delivered by the webhook");
+    const [, delivered] = (await (await fetch(`${BASE_URL}/api/v1/repos/me/app/issues/1/comments`)).json()) as unknown[];
+    const event = { ...issueEvent(forgejo, "created", { number: 1, title: "Issue 1", state: "open" }), comment: delivered };
+    await plugin.definition.onWebhook!(delivery(event, undefined, "issue_comment"));
+    await harness.runJob("sync-issues");
+
+    expect(copied()).toEqual([expect.stringContaining("Delivered by the webhook"), expect.stringContaining("Missed by the webhook")]);
+  });
 });
 
 describe("issue sync without waste", () => {
@@ -949,7 +985,7 @@ describe("work requests from Forgejo", () => {
       repository: forgejo.repositoryJson("me/app"),
       sender: { login: sender },
       issue,
-      comment: { body, html_url: `${BASE_URL}/me/app/pulls/7#issuecomment-1` },
+      comment: { id: 1, body, html_url: `${BASE_URL}/me/app/pulls/7#issuecomment-1`, user: { login: sender } },
     };
   }
 
@@ -990,6 +1026,42 @@ describe("work requests from Forgejo", () => {
       { title: "Broken login", assignee: "lead", parentId: null },
       { title: "Forgejo issue #1: Broken login", assignee: "dev", parentId: imported.id },
     ]);
+  });
+
+  it("leaves an imported issue with the person assigned to it, and gives the agent a task under it", async () => {
+    const { forgejo, harness, woken } = await setUpRequests();
+    forgejo.addIssue("me/app", { number: 1, title: "Broken login" });
+    await harness.runJob("sync-issues");
+    const [imported] = await harness.ctx.issues.list({ companyId: "co-1" });
+    await harness.ctx.issues.update(imported.id, { assigneeUserId: "user-1" }, "co-1");
+    const issue = { number: 1, title: "Broken login", body: "", html_url: `${BASE_URL}/me/app/issues/1`, assignees: null };
+
+    await plugin.definition.onWebhook!(delivery(commentEvent(forgejo, "@backend-dev can you help?", "alice", issue), undefined, "issue_comment"));
+
+    expect(await woken()).toEqual([{ title: "Forgejo issue #1: Broken login", assignee: "dev", parentId: imported.id }]);
+    expect(await harness.ctx.issues.get(imported.id, "co-1")).toMatchObject({ assigneeUserId: "user-1", assigneeAgentId: null });
+  });
+
+  it("skips a mentioned agent Paperclip cannot wake, and still wakes the others", async () => {
+    const { forgejo, harness, woken } = await setUpRequests();
+    harness.seed({ agents: [{ ...agent("qa", "qa"), status: "paused" } as Agent] });
+
+    await plugin.definition.onWebhook!(delivery(commentEvent(forgejo, "@qa @backend-dev please look"), undefined, "issue_comment"));
+
+    expect(await woken()).toEqual([{ title: "Forgejo pull request #7: Add login", assignee: "dev", parentId: null }]);
+  });
+
+  it("quotes a comment on an imported issue when issues are no longer imported", async () => {
+    const { forgejo, harness } = await setUpRequests();
+    forgejo.addIssue("me/app", { number: 1, title: "Broken login" });
+    await harness.runJob("sync-issues");
+    harness.ctx.config.get = async () => ({ ...config, syncIssues: false });
+    const createComment = vi.spyOn(harness.ctx.issues, "createComment");
+    const issue = { number: 1, title: "Broken login", body: "", html_url: `${BASE_URL}/me/app/issues/1`, assignees: null };
+
+    await plugin.definition.onWebhook!(delivery(commentEvent(forgejo, "@backend-dev please fix X", "alice", issue), undefined, "issue_comment"));
+
+    expect(createComment.mock.calls.map(([, body]) => body)).toEqual([expect.stringContaining("> @backend-dev please fix X")]);
   });
 
   it("ignores requests from people who cannot write to the repository, and from the plugin's own accounts", async () => {

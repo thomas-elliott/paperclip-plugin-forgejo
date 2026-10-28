@@ -84,12 +84,13 @@ export async function resolveObject(ctx: PluginContext, params: ResolveExternalO
 
   const { repository, number } = parseIssueKey(params.externalId);
   try {
-    if (params.objectType === "pull_request") {
-      const pull = await forgejoJson<ForgejoPullRequestJson>(ctx, forgejo, `/repos/${repository}/pulls/${number}`);
-      return { ok: true, snapshot: pullRequestSnapshot(pull) };
+    if (params.objectType !== "pull_request") {
+      const issue = await forgejoJson<ForgejoIssueJson>(ctx, forgejo, `/repos/${repository}/issues/${number}`);
+      // Forgejo also serves a pull request at /issues/<n>, so a link of that form may be one.
+      if (!issue.pull_request) return { ok: true, snapshot: issueSnapshot(issue) };
     }
-    const issue = await forgejoJson<ForgejoIssueJson>(ctx, forgejo, `/repos/${repository}/issues/${number}`);
-    return { ok: true, snapshot: issueSnapshot(issue) };
+    const pull = await forgejoJson<ForgejoPullRequestJson>(ctx, forgejo, `/repos/${repository}/pulls/${number}`);
+    return { ok: true, snapshot: pullRequestSnapshot(pull) };
   } catch (error) {
     // Forgejo answers 404 both for deleted items and for private ones the token cannot see.
     if (error instanceof ForgejoError && error.status === 404) {

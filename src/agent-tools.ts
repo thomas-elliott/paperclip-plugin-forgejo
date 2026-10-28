@@ -10,6 +10,7 @@ import {
   isRepositoryName,
   NOT_CONFIGURED,
   projectRepositoryNames,
+  repositoryNameOnServer,
   type Forgejo,
   type ForgejoIssueJson,
   type ForgejoPullRequestJson,
@@ -145,9 +146,9 @@ type Tool = (call: {
 // Accepts "owner/repo" or a full Forgejo address. Without one, uses the project's only Forgejo repository.
 async function resolveRepository(ctx: PluginContext, forgejo: Forgejo, runCtx: ToolRunContext, given: string | undefined) {
   if (given) {
-    const path = given.startsWith(forgejo.baseUrl) ? given.slice(forgejo.baseUrl.length) : given;
-    const name = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-    if (!isRepositoryName(name)) throw new Error(`"${given}" is not a Forgejo repository. Pass repository as owner/repo.`);
+    // A full address, over HTTPS or SSH, has a ":"; "owner/repo" never does.
+    const name = given.includes(":") ? repositoryNameOnServer(forgejo.baseUrl, given) : given.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+    if (!name || !isRepositoryName(name)) throw new Error(`"${given}" is not a Forgejo repository. Pass repository as owner/repo.`);
     return name;
   }
   const names = await projectRepositoryNames(ctx, forgejo, runCtx.companyId, runCtx.projectId);

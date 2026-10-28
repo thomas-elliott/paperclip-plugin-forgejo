@@ -1,4 +1,4 @@
-import type { Issue, PluginContext } from "@paperclipai/plugin-sdk";
+import type { Agent, Issue, PluginContext } from "@paperclipai/plugin-sdk";
 import manifest from "./manifest.js";
 import { ForgejoError, forgejoJson, issueKey, type Forgejo, type ForgejoRepositoryJson } from "./forgejo.js";
 import { ISSUE_ORIGIN, oneAtATime, projectsUsing } from "./issue-sync.js";
@@ -10,11 +10,11 @@ const REQUEST_ORIGIN = `plugin:${manifest.id}:request` as const;
 // Paperclip refuses to wake an agent on an issue in these statuses.
 const NOT_WAKEABLE: Issue["status"][] = ["backlog", "done", "cancelled"];
 
+// Paperclip refuses to wake an agent in these statuses, and to assign work to some of them.
+const AGENT_NOT_WAKEABLE: Agent["status"][] = ["paused", "pending_approval", "terminated"];
+
 // Forgejo's header for each kind of submitted pull request review.
 const REVIEW_EVENTS = ["pull_request_approved", "pull_request_rejected", "pull_request_comment"];
-
-// The only actions readRequest acts on.
-const ACTIONS_THAT_ASK = ["assigned", "review_requested", "opened", "created", "reviewed"];
 
 type ForgejoUser = { login: string };
 type Thread = { number: number; title: string; body: string; html_url: string; assignees: ForgejoUser[] | null };
@@ -31,22 +31,21 @@ export type DeliveryPayload = {
   review?: { content: string };
 };
 
-// What a delivery asks for. `asks` is "assigned" or "review" when the plugin's account was assigned
-// or asked to review, and "mention" when the request can only come from a mention in `text`.
+// What a delivery may ask for. `asks` is "assigned" or "review" when someone was assigned or asked
+// to review, which is a request only if that someone is the plugin's account, and "mention" when the
+// request can only come from a mention in `text`.
 type Request = { thread: Thread; isPull: boolean; asks: "assigned" | "review" | "mention"; text: string; link: string };
 
 // Only new descriptions, comments and reviews count: adding a mention by editing does nothing.
-function readRequest(event: string, payload: DeliveryPayload, accounts: string[]): Request | null {
+function readRequest(event: string, payload: DeliveryPayload): Request | null {
   const { action, issue, pull_request: pull } = payload;
   if (event === "issues" && issue) {
-    if (action === "assigned" && assigneesInclude(issue, accounts)) return { thread: issue, isPull: false, asks: "assigned", text: "", link: issue.html_url };
+    if (action === "assigned") return { thread: issue, isPull: false, asks: "assigned", text: "", link: issue.html_url };
     if (action === "opened") return { thread: issue, isPull: false, asks: "mention", text: issue.body, link: issue.html_url };
   }
   if (event === "pull_request" && pull) {
-    if (action === "assigned" && assigneesInclude(pull, accounts)) return { thread: pull, isPull: true, asks: "assigned", text: "", link: pull.html_url };
-    if (action === "review_requested" && accounts.includes(payload.requested_reviewer?.login.toLowerCase() ?? "")) {
-      return { thread: pull, isPull: true, asks: "review", text: "", link: pull.html_url };
-    }
+    if (action === "assigned") return { thread: pull, isPull: true, asks: "assigned", text: "", link: pull.html_url };
+    if (action === "review_requested") return { thread: pull, isPull: true, asks: "review", text: "", link: pull.html_url };
     if (action === "opened") return { thread: pull, isPull: true, asks: "mention", text: pull.body, link: pull.html_url };
   }
   if (event === "issue_comment" && issue && payload.comment && action === "created") {
@@ -56,6 +55,13 @@ function readRequest(event: string, payload: DeliveryPayload, accounts: string[]
     return { thread: pull, isPull: true, asks: "mention", text: payload.review.content, link: pull.html_url };
   }
   return null;
+}
+
+// Whether the request is to the plugin's account, which stands for the project's lead agent.
+function asksPluginAccount(request: Request, payload: DeliveryPayload, accounts: string[]) {
+  if (request.asks === "assigned") return assigneesInclude(request.thread, accounts);
+  if (request.asks === "review") return accounts.includes(payload.requested_reviewer?.login.toLowerCase() ?? "");
+  return accounts.some((account) => mentions(request.text, account));
 }
 
 function assigneesInclude(thread: Thread, accounts: string[]) {
@@ -104,17 +110,15 @@ export async function startRequestedWork(
   payload: DeliveryPayload,
   deliveryId: string,
 ) {
-  // Most deliveries ask for nothing; checking the action first saves Forgejo calls for those.
-  if (!ACTIONS_THAT_ASK.includes(payload.action)) return;
+  const request = readRequest(event, payload);
+  // Most deliveries, and most comments, ask for nothing; returning first saves the lookups below.
+  if (!request || (request.asks === "mention" && !request.text.includes("@"))) return;
   const accounts = await pluginAccounts(ctx, forgejo);
-  const request = readRequest(event, payload, accounts);
   // Ignoring the plugin's own accounts keeps an agent's comment from starting more agent work.
-  if (!request || accounts.includes(payload.sender.login.toLowerCase())) return;
+  if (accounts.includes(payload.sender.login.toLowerCase())) return;
 
-  const leadAsked = request.asks !== "mention" || accounts.some((account) => mentions(request.text, account));
-  const mentionedAgents = (await ctx.agents.list({ companyId })).filter(
-    (agent) => agent.status !== "terminated" && mentions(request.text, agent.urlKey),
-  );
+  const leadAsked = asksPluginAccount(request, payload, accounts);
+  const mentionedAgents = request.text ? (await ctx.agents.list({ companyId })).filter((agent) => mentions(request.text, agent.urlKey)) : [];
   if (!leadAsked && mentionedAgents.length === 0) return;
 
   const repository = payload.repository.full_name;
@@ -144,13 +148,19 @@ export async function startRequestedWork(
     if (lead) agents = [lead, ...mentionedAgents.filter((agent) => agent.id !== lead.id)];
     else ctx.logger.warn("A Forgejo request went to the project's lead agent, but the project has none", { projectId, key });
   }
+  const skipped = agents.filter((agent) => AGENT_NOT_WAKEABLE.includes(agent.status));
+  if (skipped.length > 0) {
+    ctx.logger.info("Ignored a Forgejo request to agents that cannot be woken", { key, agents: skipped.map((agent) => `${agent.urlKey} (${agent.status})`) });
+    agents = agents.filter((agent) => !skipped.includes(agent));
+  }
 
   await oneAtATime(`request:${projectId}:${key}`, async () => {
     for (const agent of agents) {
       const task = await assignTask(ctx, companyId, projectId, key, request, agent.id, imported);
       if (task.originKind === ISSUE_ORIGIN) imported = task;
-      // The comment copy has already posted a comment on an imported issue, so it is not quoted again.
-      const quoted = request.text && !(task.originKind === ISSUE_ORIGIN && event === "issue_comment");
+      // When issues are imported, the comment copy has already posted the comment on an imported
+      // issue, so it is not quoted again.
+      const quoted = request.text && !(task.originKind === ISSUE_ORIGIN && event === "issue_comment" && forgejo.syncIssues);
       await ctx.issues.createComment(task.id, requestNote(payload.sender.login, request, quoted ? request.text : ""), companyId);
       // Comments from the plugin do not wake anyone, so the agent is woken here.
       await ctx.issues.requestWakeup(task.id, companyId, { reason: "forgejo_request", idempotencyKey: `forgejo:${deliveryId}:${agent.id}` });
@@ -159,8 +169,8 @@ export async function startRequestedWork(
 }
 
 // The agent's task for this issue or pull request, assigned to it and ready to wake. An imported
-// issue is the task of the agent assigned to it, or of the first agent asked if nobody is; any other
-// agent gets its own task under it.
+// issue is the task of the agent assigned to it, or of the first agent asked if no agent or person
+// is; any other agent gets its own task under it. Paperclip allows only one assignee per issue.
 async function assignTask(
   ctx: PluginContext,
   companyId: string,
@@ -170,7 +180,7 @@ async function assignTask(
   agentId: string,
   imported: Issue | undefined,
 ): Promise<Issue> {
-  const ownTask = imported && (!imported.assigneeAgentId || imported.assigneeAgentId === agentId);
+  const ownTask = imported && (imported.assigneeAgentId === agentId || (!imported.assigneeAgentId && !imported.assigneeUserId));
   const [existing] = ownTask ? [imported] : await ctx.issues.list({ companyId, projectId, originKind: REQUEST_ORIGIN, originId: `${key}:${agentId}` });
   if (!existing) {
     const kind = request.isPull ? "pull request" : "issue";
