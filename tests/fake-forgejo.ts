@@ -38,6 +38,9 @@ export class FakeForgejo {
   // The token of the account that opened every pull request, which Forgejo does not let approve them.
   // The harness resolves a secret reference to "resolved:<reference>".
   pullAuthorToken = "resolved:token-ref";
+  // Each user's access to every repository, for the collaborator permission endpoint. Anyone not
+  // listed can read. Set to "forbidden" to answer as Forgejo does when the token's account is not an admin.
+  permissions = new Map<string, string>();
   // While true, every request fails the way ctx.http.fetch fails when the server cannot be reached.
   unreachable = false;
   // Repositories whose issue list answers HTTP 500.
@@ -142,6 +145,15 @@ export class FakeForgejo {
 
     const review = this.handleReview(path, method, body, token, page);
     if (review) return review;
+
+    // The main token belongs to the account that opens pull requests; any other token to the reviewer.
+    if (path === "/user") return Response.json({ login: token === this.pullAuthorToken ? "someone" : "reviewer" });
+    const permission = /^\/repos\/[^/]+\/[^/]+\/collaborators\/([^/]+)\/permission$/.exec(path);
+    if (permission) {
+      const access = this.permissions.get(permission[1]) ?? "read";
+      if (access === "forbidden") return Response.json({ message: "forbidden" }, { status: 403 });
+      return Response.json({ permission: access });
+    }
 
     if (path === "/user/repos") return Response.json(page > 1 ? [] : [...this.issues.keys()].map((name) => this.repositoryJson(name)));
 

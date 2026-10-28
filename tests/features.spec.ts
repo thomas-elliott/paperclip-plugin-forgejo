@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Issue, PluginWorkspace, Project, ToolResult } from "@paperclipai/plugin-sdk";
+import type { Agent, Issue, PluginWorkspace, Project, ToolResult } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
@@ -63,6 +63,7 @@ function issueEvent(forgejo: FakeForgejo, action: string, issue: { number: numbe
   return {
     action,
     repository: forgejo.repositoryJson("me/app"),
+    sender: { login: "someone" },
     issue: { body: "", html_url: `${BASE_URL}/me/app/issues/${issue.number}`, updated_at: "2026-10-03T00:00:00Z", ...issue },
   };
 }
@@ -777,5 +778,102 @@ describe("webhook", () => {
     await plugin.definition.onWebhook!(delivery(payload));
 
     expect((await harness.ctx.issues.list({ companyId: "co-1" })).map((issue) => issue.title)).toEqual(["From a webhook"]);
+  });
+});
+
+describe("work requests from Forgejo", () => {
+  const agent = (id: string, urlKey: string) => ({ id, companyId: "co-1", name: urlKey, urlKey, status: "idle" }) as Agent;
+
+  // A project led by "lead", in a company that also has the agent "backend-dev". alice can write to me/app.
+  async function setUpRequests(pluginConfig: Record<string, unknown> = config) {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.permissions.set("alice", "write");
+    const harness = await setUp(pluginConfig, ["me/app"]);
+    harness.seed({
+      projects: [{ id: "project-1", companyId: "co-1", leadAgentId: "lead" } as Project],
+      agents: [agent("lead", "lead"), agent("dev", "backend-dev")],
+    });
+    const wakeup = vi.spyOn(harness.ctx.issues, "requestWakeup");
+    // Each woken task with its assignee, in order.
+    const woken = async () =>
+      Promise.all(
+        wakeup.mock.calls.map(async ([issueId]) => {
+          const issue = (await harness.ctx.issues.get(issueId, "co-1"))!;
+          return { title: issue.title, assignee: issue.assigneeAgentId, parentId: issue.parentId ?? null };
+        }),
+      );
+    return { forgejo, harness, woken };
+  }
+
+  const pull = { number: 7, title: "Add login", body: "", html_url: `${BASE_URL}/me/app/pulls/7`, assignees: null };
+
+  function commentEvent(forgejo: FakeForgejo, body: string, sender = "alice", issue: object = { ...pull, pull_request: {} }) {
+    return {
+      action: "created",
+      repository: forgejo.repositoryJson("me/app"),
+      sender: { login: sender },
+      issue,
+      comment: { body, html_url: `${BASE_URL}/me/app/pulls/7#issuecomment-1` },
+    };
+  }
+
+  it("gives a mentioned agent one task per pull request and wakes it each time", async () => {
+    const { forgejo, harness, woken } = await setUpRequests();
+    const createComment = vi.spyOn(harness.ctx.issues, "createComment");
+
+    await plugin.definition.onWebhook!(delivery(commentEvent(forgejo, "@backend-dev please fix the tests"), undefined, "issue_comment"));
+    await plugin.definition.onWebhook!(delivery(commentEvent(forgejo, "@Backend-Dev and the lint"), undefined, "issue_comment"));
+
+    const task = { title: "Forgejo pull request #7: Add login", assignee: "dev", parentId: null };
+    expect(await woken()).toEqual([task, task]);
+    expect(createComment.mock.calls[0][1]).toBe(
+      `**alice** [mentioned you in Forgejo](${BASE_URL}/me/app/pulls/7#issuecomment-1).\n\n> @backend-dev please fix the tests`,
+    );
+  });
+
+  it("gives the project's lead agent a review requested from the plugin's account", async () => {
+    const { forgejo, woken } = await setUpRequests();
+    const payload = { action: "review_requested", repository: forgejo.repositoryJson("me/app"), sender: { login: "alice" }, pull_request: pull, requested_reviewer: { login: "someone" } };
+
+    await plugin.definition.onWebhook!(delivery(payload, undefined, "pull_request"));
+
+    expect(await woken()).toEqual([{ title: "Forgejo pull request #7: Add login", assignee: "lead", parentId: null }]);
+  });
+
+  it("assigns an imported issue to the lead agent, and gives a second agent a task under it", async () => {
+    const { forgejo, harness, woken } = await setUpRequests();
+    forgejo.addIssue("me/app", { number: 1, title: "Broken login" });
+    await harness.runJob("sync-issues");
+    const [imported] = await harness.ctx.issues.list({ companyId: "co-1" });
+    const issue = { number: 1, title: "Broken login", body: "", html_url: `${BASE_URL}/me/app/issues/1`, assignees: [{ login: "someone" }] };
+
+    await plugin.definition.onWebhook!(delivery({ action: "assigned", repository: forgejo.repositoryJson("me/app"), sender: { login: "alice" }, issue }));
+    await plugin.definition.onWebhook!(delivery(commentEvent(forgejo, "@backend-dev can you help?", "alice", issue), undefined, "issue_comment"));
+
+    expect(await woken()).toEqual([
+      { title: "Broken login", assignee: "lead", parentId: null },
+      { title: "Forgejo issue #1: Broken login", assignee: "dev", parentId: imported.id },
+    ]);
+  });
+
+  it("ignores requests from people who cannot write to the repository, and from the plugin's own accounts", async () => {
+    const { forgejo, woken } = await setUpRequests({ ...config, reviewToken: "review-ref" });
+    forgejo.permissions.set("someone", "admin");
+    forgejo.permissions.set("reviewer", "admin");
+
+    for (const sender of ["bob", "someone", "reviewer"]) {
+      await plugin.definition.onWebhook!(delivery(commentEvent(forgejo, "@backend-dev do this", sender), undefined, "issue_comment"));
+    }
+
+    expect(await woken()).toEqual([]);
+  });
+
+  it("explains that the token's account must be a repository admin when Forgejo will not say who can write", async () => {
+    const { forgejo } = await setUpRequests();
+    forgejo.permissions.set("alice", "forbidden");
+
+    await expect(plugin.definition.onWebhook!(delivery(commentEvent(forgejo, "@backend-dev do this"), undefined, "issue_comment"))).rejects.toThrow(
+      "must be an admin of me/app",
+    );
   });
 });

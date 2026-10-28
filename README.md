@@ -122,9 +122,34 @@ straight away:
    - Target URL: `https://your-paperclip.example.com/api/plugins/paperclip-plugin-forgejo/webhooks/forgejo`
    - HTTP method: POST, content type: `application/json`
    - Secret: the same secret
-   - Trigger on: custom events, then **Issues** and **Issue comment**
+   - Trigger on: custom events, then **Issues** and **Issue comment**. To let Forgejo start agent
+     work, also tick the events listed in the next section.
 3. Use Test Delivery in Forgejo. Paperclip records each delivery. A delivery fails if the secret does
    not match.
+
+### Let Forgejo start agent work
+
+With the webhook set up, people can hand work to agents from Forgejo:
+
+- Assign an issue or pull request to the access token's account, or ask that account for a review.
+  The project's lead agent gets the work.
+- Mention an agent by its URL key, such as `@backend-dev`, in a new issue, pull request, comment or
+  review. Mentioning the access token's account reaches the lead agent.
+
+The agent gets a task in the project that uses the repository and is woken straight away. For an
+imported issue, the imported issue is the task. Later requests on the same issue or pull request
+wake the same task.
+
+To set it up:
+
+1. Give the access token's account admin access to the repository. Forgejo only tells admins who can
+   write to a repository, and only people who can write may start agent work.
+2. On the webhook, also tick **Issue assigned**, **Pull request**, **Pull request assigned**,
+   **Pull request review requested**, **Pull request comment** and **Pull request reviewed**.
+3. Give each project a lead agent, for assignments and review requests.
+
+Requests from the plugin's own Forgejo accounts are ignored, so agents cannot start work for each
+other this way. Adding a mention by editing a comment does nothing.
 
 ### Let agents merge pull requests
 
@@ -185,6 +210,7 @@ it out. The plugin builds on these extension points instead:
 | Post an agent's new PR link on its task | `ctx.issues.createComment` | `issue.comments.create` |
 | Tell agents how to call those tools | managed skill, `ctx.skills.managed` | `skills.managed` |
 | React to Forgejo events | webhooks | `webhooks.receive` |
+| Wake agents asked for work in Forgejo | `ctx.agents.list`, `ctx.issues.requestWakeup` | `agents.read`, `issues.wakeup` |
 | Show live status of pasted Forgejo PR and issue links | `objectReferences` | `external.objects.detect`, `external.objects.read` |
 | Sync Forgejo issues into Paperclip | `ctx.issues`, a scheduled job, `issue.updated` events | `issues.read`, `issues.create`, `issues.update`, `jobs.schedule`, `events.subscribe` |
 | Copy Forgejo comments into imported issues | `ctx.issues.createComment` | `issue.comments.create` |
