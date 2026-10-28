@@ -9,8 +9,12 @@ export type Forgejo = {
   baseUrl: string;
   apiUrl: string;
   token: string;
+  // A second account's token for posting reviews, because Forgejo refuses an approval from the
+  // account that opened the pull request. Null when not set.
+  reviewToken: string | null;
   syncIssues: boolean;
   allowMerge: boolean;
+  allowApprove: boolean;
   webhookSecret: EnvSecretRefBinding | null;
 };
 
@@ -73,12 +77,17 @@ export async function connect(ctx: PluginContext, companyId: string): Promise<Fo
 
   // Resolve the token on every call: Paperclip forbids caching secret values.
   const token = await ctx.secrets.resolve(config.token as EnvSecretRefBinding, { companyId, configPath: "token" });
+  const reviewToken = config.reviewToken
+    ? await ctx.secrets.resolve(config.reviewToken as EnvSecretRefBinding, { companyId, configPath: "reviewToken" })
+    : null;
   return {
     baseUrl,
     apiUrl: `${baseUrl}/api/v1`,
     token,
+    reviewToken,
     syncIssues: config.syncIssues === true,
     allowMerge: config.allowMerge === true,
+    allowApprove: config.allowApprove === true,
     webhookSecret: (config.webhookSecret as EnvSecretRefBinding | undefined) ?? null,
   };
 }
@@ -99,13 +108,13 @@ export async function rememberConfiguredCompany(ctx: PluginContext, companyId: s
   await ctx.entities.upsert({ entityType: CONFIGURED_COMPANY, scopeKind: "instance", externalId: companyId, data: {} });
 }
 
-type RequestOptions = { withToken?: boolean; method?: string; body?: unknown };
+type RequestOptions = { withToken?: boolean; token?: string; method?: string; body?: unknown };
 
 // ctx.http.fetch throws, rather than returning a status, for bad addresses, DNS failures, timeouts and
 // blocked private addresses. Turn those into a message the user can act on.
 export async function request(ctx: PluginContext, forgejo: Forgejo, path: string, options: RequestOptions = {}) {
   const headers: Record<string, string> = { Accept: "application/json" };
-  if (options.withToken !== false) headers.Authorization = `token ${forgejo.token}`;
+  if (options.withToken !== false) headers.Authorization = `token ${options.token ?? forgejo.token}`;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   try {
     return await ctx.http.fetch(`${forgejo.apiUrl}${path}`, {
@@ -129,6 +138,13 @@ export class ForgejoError extends Error {
 
 // Calls the Forgejo API and returns the parsed body, or throws with Forgejo's own explanation.
 export async function forgejoJson<T>(ctx: PluginContext, forgejo: Forgejo, path: string, options: RequestOptions = {}): Promise<T> {
+  const text = await forgejoText(ctx, forgejo, path, options);
+  // Some endpoints, such as merge, answer with an empty body.
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+// Like forgejoJson, for endpoints that answer with plain text, such as a pull request's diff.
+export async function forgejoText(ctx: PluginContext, forgejo: Forgejo, path: string, options: RequestOptions = {}): Promise<string> {
   const response = await request(ctx, forgejo, path, options);
   const text = await response.text();
   if (!response.ok) {
@@ -142,8 +158,7 @@ export async function forgejoJson<T>(ctx: PluginContext, forgejo: Forgejo, path:
     }
     throw new ForgejoError(`Forgejo answered HTTP ${response.status} to ${options.method ?? "GET"} ${path}${detail}`, response.status);
   }
-  // Some endpoints, such as merge, answer with an empty body.
-  return (text ? JSON.parse(text) : undefined) as T;
+  return text;
 }
 
 // Fetches every page of a list endpoint.
