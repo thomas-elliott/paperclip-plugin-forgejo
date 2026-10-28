@@ -407,6 +407,25 @@ describe("labels, assignees, branches and files", () => {
     });
   });
 
+  it("lists the top folder when no path is given, and explains a missing file", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.files.set("me/app@main:README.md", "Hello");
+    forgejo.files.set("me/app@main:src/app.ts", "");
+    const harness = await setUp(config, ["me/app"]);
+
+    const top = await harness.executeTool<ToolResult>("read_file", {}, runCtx);
+    const missing = await harness.executeTool<ToolResult>("read_file", { path: "src/gone.ts", ref: "feature" }, runCtx);
+
+    expect(top.data).toEqual({
+      type: "dir",
+      entries: [
+        { name: "README.md", path: "README.md", type: "file" },
+        { name: "src", path: "src", type: "dir" },
+      ],
+    });
+    expect(missing.error).toBe("me/app has no file or directory src/gone.ts at feature. Check the path, and the ref with list_branches.");
+  });
+
   it("refuses to show a binary file as text", async () => {
     const forgejo = new FakeForgejo(["me/app"]);
     forgejo.files.set("me/app@main:logo.png", "\u0089PNG\u0000");

@@ -95,10 +95,9 @@ const tools: PluginToolDeclaration[] = [
     description: "Reads a text file from a Forgejo repository at a branch, tag or commit. For a directory, lists what it contains.",
     parametersSchema: {
       type: "object",
-      required: ["path"],
       properties: {
         repository,
-        path: { type: "string", description: "Path of the file or directory in the repository." },
+        path: { type: "string", description: "Path of the file or directory in the repository. Leave out to list the top folder." },
         ref: { type: "string", description: "Branch, tag or commit. Defaults to the repository's default branch." },
       },
     },

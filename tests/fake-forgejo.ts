@@ -241,10 +241,12 @@ export class FakeForgejo {
     const organisation = /^\/orgs\/([^/]+)\/labels$/.exec(path);
     if (organisation) {
       const labels = this.organisationLabels.get(organisation[1]);
-      if (!labels) return Response.json({ message: "not found" }, { status: 404 });
+      // Forgejo checks the token's scope before looking for the organisation, so a token without
+      // read:organization gets this for a user too.
+      if (!labels) return Response.json({ message: "token does not have at least one of required scope(s): [read:organization]" }, { status: 403 });
       return Response.json(page > 1 ? [] : labels);
     }
-    const match = /^\/repos\/([^/]+\/[^/]+)\/(labels|branches|contents\/(.+))$/.exec(path);
+    const match = /^\/repos\/([^/]+\/[^/]+)\/(labels|branches|contents(?:\/(.+))?)$/.exec(path);
     if (!match) return undefined;
     const [, repository, kind, filePath] = match;
     if (kind === "labels") return Response.json(page > 1 ? [] : (this.repositoryLabels.get(repository) ?? []));
@@ -253,19 +255,21 @@ export class FakeForgejo {
       return Response.json(page > 1 ? [] : branches);
     }
     const prefix = `${repository}@${searchParams.get("ref") ?? "main"}:`;
-    const wanted = decodeURIComponent(filePath);
+    // Without a path, Forgejo lists the top folder.
+    const wanted = filePath ? decodeURIComponent(filePath) : "";
     const file = this.files.get(prefix + wanted);
     if (file !== undefined) {
       const size = Buffer.byteLength(file);
       return Response.json({ name: wanted.split("/").pop(), path: wanted, type: "file", size, content: Buffer.from(file).toString("base64") });
     }
-    const inside = [...this.files.keys()].filter((key) => key.startsWith(`${prefix}${wanted}/`)).map((key) => key.slice(prefix.length));
+    const folder = wanted ? `${wanted}/` : "";
+    const inside = [...this.files.keys()].filter((key) => key.startsWith(prefix + folder)).map((key) => key.slice(prefix.length));
     if (inside.length === 0) return Response.json({ message: "object does not exist" }, { status: 404 });
     // Each file directly in the directory, and each directory below it once.
-    const names = [...new Set(inside.map((entry) => entry.slice(wanted.length + 1).split("/")[0]))];
+    const names = [...new Set(inside.map((entry) => entry.slice(folder.length).split("/")[0]))];
     return Response.json(
       names.map((name) => {
-        const entryPath = `${wanted}/${name}`;
+        const entryPath = folder + name;
         return { name, path: entryPath, type: inside.includes(entryPath) ? "file" : "dir", size: 0 };
       }),
     );
