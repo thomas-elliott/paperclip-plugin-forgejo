@@ -156,6 +156,16 @@ describe("link status", () => {
 });
 
 describe("agent tools", () => {
+  it("installs a skill naming every tool when the settings are saved", async () => {
+    new FakeForgejo(["me/app"]);
+    const harness = await setUp(config, ["me/app"]);
+
+    const { skill } = await harness.ctx.skills.managed.get("forgejo-tools", "co-1");
+
+    expect(skill).not.toBeNull();
+    for (const tool of manifest.tools ?? []) expect(skill!.markdown).toContain(`\`${tool.name}\``);
+  });
+
   it("uses the project's only Forgejo repository when none is given", async () => {
     const forgejo = new FakeForgejo(["me/app", "me/other"]);
     forgejo.addIssue("me/app", { number: 4, title: "Fix login" });

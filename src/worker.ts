@@ -1,4 +1,5 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
+import { TOOLS_SKILL_KEY } from "./agent-skill.js";
 import { registerAgentTools } from "./agent-tools.js";
 import { addressKey, connect, errorMessage, listRepositories, NOT_CONFIGURED, rememberConfiguredCompany, repositoriesUsedBy, repositoryAddressKeys, request } from "./forgejo.js";
 import { handleWebhook, onPaperclipIssueUpdated, syncAllCompanies } from "./issue-sync.js";
@@ -71,6 +72,18 @@ async function getProjectRepositories(ctx: PluginContext, companyId: string, pro
   };
 }
 
+// Saving the settings installs the skill. reconcile() leaves an existing skill unchanged, so a skill whose
+// text differs from this version's is reset: it has to describe the tools this version has.
+async function installToolsSkill(ctx: PluginContext, companyId: string): Promise<void> {
+  try {
+    const skill = await ctx.skills.managed.reconcile(TOOLS_SKILL_KEY, companyId);
+    if (skill.defaultDrift) await ctx.skills.managed.reset(TOOLS_SKILL_KEY, companyId);
+  } catch (error) {
+    // The settings are already saved; a missing skill should not make the save fail.
+    ctx.logger.warn("Could not install the Forgejo tools skill", { companyId, error: errorMessage(error) });
+  }
+}
+
 let pluginContext: PluginContext | null = null;
 
 function requireContext(): PluginContext {
@@ -100,7 +113,9 @@ const plugin = definePlugin({
   // Implementing onConfigChanged also stops Paperclip restarting the worker on every settings save;
   // the plugin reads its settings on every call, so it needs no restart.
   async onConfigChanged(_config, context) {
-    if (context?.companyId) await rememberConfiguredCompany(requireContext(), context.companyId);
+    if (!context?.companyId) return;
+    await rememberConfiguredCompany(requireContext(), context.companyId);
+    await installToolsSkill(requireContext(), context.companyId);
   },
 
   async onWebhook(input) {
