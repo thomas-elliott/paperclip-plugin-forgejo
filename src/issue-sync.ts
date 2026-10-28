@@ -74,21 +74,22 @@ type ForgejoCommentJson = {
   updated_at: string;
 };
 
-// The ID of the newest Forgejo comment copied to a Paperclip issue. Forgejo comment IDs only go up,
-// so a comment with a higher ID has not been copied yet.
-function lastCopiedCommentKey(issueId: string) {
-  return { scopeKind: "issue" as const, scopeId: issueId, stateKey: "forgejo-last-comment" };
+// The IDs of the Forgejo comments copied to a Paperclip issue. Every ID is kept, not only the
+// newest, because the catch-up can find a comment the webhook missed after a newer one was copied.
+function copiedCommentsKey(issueId: string) {
+  return { scopeKind: "issue" as const, scopeId: issueId, stateKey: "forgejo-copied-comments" };
 }
 
-// Copies the comments newer than the last one copied, oldest first. Callers hold the issue's turn in
-// oneAtATime, so the webhook and the sync job cannot both copy the same comment.
+// Copies the comments not copied yet, oldest first. Callers hold the issue's turn in oneAtATime, so
+// the webhook and the sync job cannot both copy the same comment.
 async function copyNewComments(ctx: PluginContext, companyId: string, issueId: string, comments: ForgejoCommentJson[]) {
-  const lastCopied = ((await ctx.state.get(lastCopiedCommentKey(issueId))) as number | null) ?? 0;
-  const newComments = comments.filter((comment) => comment.id > lastCopied).sort((a, b) => a.id - b.id);
+  const copied = ((await ctx.state.get(copiedCommentsKey(issueId))) as number[] | null) ?? [];
+  const newComments = comments.filter((comment) => !copied.includes(comment.id)).sort((a, b) => a.id - b.id);
   for (const comment of newComments) {
     await ctx.issues.createComment(issueId, `**${comment.user.login}** [commented in Forgejo](${comment.html_url}):\n\n${comment.body}`, companyId);
     // Saved after each comment, so a failure part-way does not copy the earlier ones again.
-    await ctx.state.set(lastCopiedCommentKey(issueId), comment.id);
+    copied.push(comment.id);
+    await ctx.state.set(copiedCommentsKey(issueId), copied);
   }
 }
 
@@ -178,6 +179,8 @@ async function syncedIssues(ctx: PluginContext, companyId: string, projectId: st
 async function syncRepository(ctx: PluginContext, forgejo: Forgejo, companyId: string, repository: string, targets: Target[]) {
   const openIssues = await forgejoPages<ForgejoIssueJson>(ctx, forgejo, `/repos/${repository}/issues?state=open&type=issues`);
   const prefix = `${repository.toLowerCase()}#`;
+  // Each project's imported issues from this repository, by issueKey, for the comment catch-up.
+  const importedByTarget: [Target, Map<string, Issue>][] = [];
 
   for (const target of targets) {
     const synced = new Map(
@@ -185,6 +188,7 @@ async function syncRepository(ctx: PluginContext, forgejo: Forgejo, companyId: s
         .filter((issue) => issue.originId?.startsWith(prefix))
         .map((issue) => [issue.originId as string, issue]),
     );
+    importedByTarget.push([target, new Map(synced)]);
 
     for (const issue of openIssues) {
       const key = issueKey(repository, issue.number);
@@ -205,7 +209,7 @@ async function syncRepository(ctx: PluginContext, forgejo: Forgejo, companyId: s
     }
   }
 
-  await copyMissedComments(ctx, forgejo, companyId, repository, targets);
+  await copyMissedComments(ctx, forgejo, companyId, repository, importedByTarget);
 }
 
 // Where the last catch-up stopped in a repository's comments: the newest updated_at it saw, by
@@ -215,8 +219,15 @@ function commentsSeenUntilKey(companyId: string, repository: string) {
 }
 
 // Copies comments the webhook missed, such as those made while it was not set up, fetching the
-// repository's comments once for every project. The first catch-up reads every comment.
-async function copyMissedComments(ctx: PluginContext, forgejo: Forgejo, companyId: string, repository: string, targets: Target[]) {
+// repository's comments once for every project. The first catch-up reads every comment. Issues
+// imported during this sync are left out: importing copied their comments.
+async function copyMissedComments(
+  ctx: PluginContext,
+  forgejo: Forgejo,
+  companyId: string,
+  repository: string,
+  importedByTarget: [Target, Map<string, Issue>][],
+) {
   const seenUntilKey = commentsSeenUntilKey(companyId, repository);
   const seenUntil = (await ctx.state.get(seenUntilKey)) as string | null;
   const since = seenUntil ? `?since=${encodeURIComponent(seenUntil)}` : "";
@@ -227,9 +238,9 @@ async function copyMissedComments(ctx: PluginContext, forgejo: Forgejo, companyI
     const number = /\/issues\/(\d+)$/.exec(comment.issue_url)?.[1];
     if (number) byNumber.set(Number(number), [...(byNumber.get(Number(number)) ?? []), comment]);
   }
-  for (const target of targets) {
+  for (const [target, imported] of importedByTarget) {
     for (const [number, issueComments] of byNumber) {
-      const [existing] = await syncedIssues(ctx, target.companyId, target.projectId, issueKey(target.repository, number));
+      const existing = imported.get(issueKey(target.repository, number));
       if (existing) await oneAtATime(issueTurn(target, number), () => copyNewComments(ctx, target.companyId, existing.id, issueComments));
     }
   }
