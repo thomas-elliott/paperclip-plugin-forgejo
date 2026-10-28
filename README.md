@@ -76,6 +76,7 @@ You need a Forgejo server, a Paperclip instance, and the right to install plugin
    | `read:user` | Checking the connection |
    | `write:issue` | Reading, creating, commenting on and closing issues |
    | `write:repository` | Listing repositories, and opening, reading, reviewing and merging pull requests |
+   | `read:organization` | Optional. Lets agents use an organisation's labels on its repositories |
 
    For read-only use, `read:issue` and `read:repository` are enough, but agents then cannot comment,
    open pull requests or close imported issues.

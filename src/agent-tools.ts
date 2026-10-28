@@ -110,11 +110,12 @@ async function labelIds(ctx: PluginContext, forgejo: Forgejo, repository: string
   if (names.length === 0) return [];
   type Label = { id: number; name: string };
   const labels = await forgejoPages<Label>(ctx, forgejo, `/repos/${repository}/labels`);
-  // An organisation's labels can be used in all its repositories. Forgejo answers 404 for a user.
+  // An organisation's labels can be used in all its repositories. Forgejo answers 404 when the owner
+  // is a user, and 403 when the token lacks the read:organization scope, which it checks first.
   try {
     labels.push(...(await forgejoPages<Label>(ctx, forgejo, `/orgs/${repository.split("/")[0]}/labels`)));
   } catch (error) {
-    if (!(error instanceof ForgejoError && error.status === 404)) throw error;
+    if (!(error instanceof ForgejoError && (error.status === 404 || error.status === 403))) throw error;
   }
   const unknown = names.filter((name) => !labels.some((label) => label.name === name));
   if (unknown.length > 0) {
@@ -124,9 +125,11 @@ async function labelIds(ctx: PluginContext, forgejo: Forgejo, repository: string
 }
 
 // A file path made safe for an API path: the path goes after the endpoint, so "." or ".." parts
-// could reach other endpoints with the operator's token.
+// could reach other endpoints with the operator's token. The top folder is "".
 function encodeFilePath(path: string): string {
-  const parts = path.replace(/^\/+|\/+$/g, "").split("/");
+  const trimmed = path.replace(/^\/+|\/+$/g, "");
+  if (trimmed === "") return "";
+  const parts = trimmed.split("/");
   if (parts.some((part) => part === "" || part === "." || part === "..")) throw new Error(`"${path}" is not a file path in the repository.`);
   return parts.map(encodeURIComponent).join("/");
 }
@@ -266,9 +269,18 @@ const tools: Record<string, Tool> = {
 
   async read_file({ ctx, forgejo, repository, input }) {
     type Entry = { name: string; path: string; type: string; size: number; content?: string | null };
+    const encodedPath = encodeFilePath(input.path ?? "");
     const query = input.ref ? `?ref=${encodeURIComponent(input.ref)}` : "";
-    // Forgejo answers with a list for a directory.
-    const found = await forgejoJson<Entry | Entry[]>(ctx, forgejo, `/repos/${await repository()}/contents/${encodeFilePath(input.path!)}${query}`);
+    const name = await repository();
+    let found: Entry | Entry[];
+    try {
+      // Forgejo answers with a list for a directory.
+      found = await forgejoJson<Entry | Entry[]>(ctx, forgejo, `/repos/${name}/contents${encodedPath && `/${encodedPath}`}${query}`);
+    } catch (error) {
+      if (!(error instanceof ForgejoError && error.status === 404)) throw error;
+      const where = input.ref ? `at ${input.ref}` : "on the default branch";
+      throw new Error(`${name} has no file or directory ${input.path ?? "/"} ${where}. Check the path, and the ref with list_branches.`);
+    }
     if (Array.isArray(found)) return { type: "dir", entries: found.map((entry) => ({ name: entry.name, path: entry.path, type: entry.type })) };
     if (found.type !== "file") throw new Error(`${found.path} is a ${found.type}, not a file.`);
     // Forgejo leaves out the content of files too large for its API.
