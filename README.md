@@ -10,9 +10,11 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
   the token belongs to.
 - A Forgejo tab on each project lists your repositories and marks the ones the project already
   uses. Pick a repository and add it as a workspace with one button, or copy the command that adds it.
-- Agents get tools to search, read, create and update Forgejo issues, comment, open pull requests,
-  read a pull request's files, diff and checks, and review pull requests and read their reviews. Agents leave out the repository when their project
-  uses exactly one Forgejo repository. A **Forgejo tools** skill tells agents how to call the tools.
+- Agents get tools to search, read, create and update Forgejo issues (including labels and
+  assignees), comment, open, close and reopen pull requests, read a pull request's files, diff and
+  checks, review pull requests and read their reviews, list branches, and read files at any branch or
+  commit. Agents leave out the repository when their project uses exactly one Forgejo repository. A
+  **Forgejo tools** skill tells agents how to call the tools.
 - Agents can merge pull requests only if you turn on **Let agents merge pull requests**, and approve
   them only if you turn on **Let agents approve pull requests**. Forgejo branch protection still
   applies.
