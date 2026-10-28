@@ -13,6 +13,8 @@ const repository = {
     "Forgejo repository as owner/repo. Leave out when the current Paperclip project uses exactly one Forgejo repository.",
 };
 const number = { type: "integer", minimum: 1, description: "Issue or pull request number." };
+const labels = { type: "array", items: { type: "string" }, description: "Label names, as shown in Forgejo." };
+const assignees = { type: "array", items: { type: "string" }, description: "Forgejo user names." };
 
 const tools: PluginToolDeclaration[] = [
   {
@@ -55,17 +57,18 @@ const tools: PluginToolDeclaration[] = [
   {
     name: "create_issue",
     displayName: "Create a Forgejo issue",
-    description: "Opens a new issue in a Forgejo repository.",
+    description: "Opens a new issue in a Forgejo repository, optionally with labels and assignees.",
     parametersSchema: {
       type: "object",
       required: ["title"],
-      properties: { repository, title: { type: "string" }, body: { type: "string", description: "Description in Markdown." } },
+      properties: { repository, title: { type: "string" }, body: { type: "string", description: "Description in Markdown." }, labels, assignees },
     },
   },
   {
     name: "update_issue",
     displayName: "Update a Forgejo issue",
-    description: "Changes the title, description or state of a Forgejo issue or pull request. Only the fields given change.",
+    description:
+      "Changes the title, description, state, labels or assignees of a Forgejo issue or pull request. Set state to close or reopen one. Only the fields given change; labels and assignees replace the current ones, and an empty list removes them all.",
     parametersSchema: {
       type: "object",
       required: ["number"],
@@ -75,6 +78,28 @@ const tools: PluginToolDeclaration[] = [
         title: { type: "string" },
         body: { type: "string", description: "Description in Markdown." },
         state: { type: "string", enum: ["open", "closed"] },
+        labels,
+        assignees,
+      },
+    },
+  },
+  {
+    name: "list_branches",
+    displayName: "List Forgejo branches",
+    description: "Lists a Forgejo repository's branches, each with its latest commit and whether it is protected.",
+    parametersSchema: { type: "object", properties: { repository } },
+  },
+  {
+    name: "read_file",
+    displayName: "Read a file in Forgejo",
+    description: "Reads a text file from a Forgejo repository at a branch, tag or commit. For a directory, lists what it contains.",
+    parametersSchema: {
+      type: "object",
+      required: ["path"],
+      properties: {
+        repository,
+        path: { type: "string", description: "Path of the file or directory in the repository." },
+        ref: { type: "string", description: "Branch, tag or commit. Defaults to the repository's default branch." },
       },
     },
   },

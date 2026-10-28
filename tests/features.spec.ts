@@ -311,6 +311,123 @@ describe("agent tools", () => {
   });
 });
 
+describe("labels, assignees, branches and files", () => {
+  function labelled() {
+    const forgejo = new FakeForgejo(["team/app"]);
+    forgejo.repositoryLabels.set("team/app", [{ id: 1, name: "bug" }]);
+    forgejo.organisationLabels.set("team", [{ id: 7, name: "priority/high" }]);
+    return forgejo;
+  }
+
+  it("creates an issue with labels, including the organisation's, and assignees", async () => {
+    const forgejo = labelled();
+    const harness = await setUp(config, ["team/app"]);
+
+    const result = await harness.executeTool<ToolResult>("create_issue", { title: "Crash", labels: ["bug", "priority/high"], assignees: ["ana"] }, runCtx);
+
+    expect(result.data).toMatchObject({ labels: ["bug", "priority/high"], assignees: ["ana"] });
+    expect(forgejo.requests.find((request) => request.method === "POST")?.body).toMatchObject({ labels: [1, 7] });
+  });
+
+  it("refuses an unknown label, naming the labels there are, and creates nothing", async () => {
+    const forgejo = labelled();
+    const harness = await setUp(config, ["team/app"]);
+
+    const result = await harness.executeTool<ToolResult>("create_issue", { title: "Crash", labels: ["bgu"] }, runCtx);
+
+    expect(result.error).toBe("team/app has no label bgu. Its labels are: bug, priority/high.");
+    expect(forgejo.issues.get("team/app")).toEqual([]);
+  });
+
+  it("replaces an issue's labels and assignees, leaving out what is not given", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.repositoryLabels.set("me/app", [{ id: 1, name: "bug" }, { id: 2, name: "docs" }]);
+    forgejo.addIssue("me/app", { number: 4, labels: ["bug"], assignees: ["ana"] });
+    const harness = await setUp(config, ["me/app"]);
+
+    const result = await harness.executeTool<ToolResult>("update_issue", { number: 4, labels: ["docs"], assignees: [] }, runCtx);
+
+    expect(result.data).toMatchObject({ labels: ["docs"], assignees: [] });
+    const unlabelled = await harness.executeTool<ToolResult>("update_issue", { number: 4, labels: [] }, runCtx);
+    expect(unlabelled.data).toMatchObject({ labels: [], title: "Issue 4" });
+  });
+
+  it("closes and reopens a pull request", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.addIssue("me/app", { number: 5, isPull: true });
+    const harness = await setUp(config, ["me/app"]);
+
+    await harness.executeTool<ToolResult>("update_issue", { number: 5, state: "closed" }, runCtx);
+    expect(forgejo.issue("me/app", 5)?.state).toBe("closed");
+    await harness.executeTool<ToolResult>("update_issue", { number: 5, state: "open" }, runCtx);
+    expect(forgejo.issue("me/app", 5)?.state).toBe("open");
+  });
+
+  it("rejects labels that are not a list of names", async () => {
+    new FakeForgejo(["me/app"]);
+    const harness = await setUp(config, ["me/app"]);
+
+    const result = await harness.executeTool<ToolResult>("update_issue", { number: 4, labels: "bug" }, runCtx);
+
+    expect(result.error).toBe("labels must be a list of names.");
+  });
+
+  it("lists branches with their latest commit", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.branches.set("me/app", [{ name: "main", sha: "aaa" }, { name: "feature", sha: "bbb" }]);
+    const harness = await setUp(config, ["me/app"]);
+
+    const result = await harness.executeTool<ToolResult>("list_branches", {}, runCtx);
+
+    expect(result.data).toEqual([
+      { name: "main", commit: "aaa", protected: true },
+      { name: "feature", commit: "bbb", protected: false },
+    ]);
+  });
+
+  it("reads a file at a branch, and lists a directory", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.files.set("me/app@main:src/app.ts", "old");
+    forgejo.files.set("me/app@feature:src/app.ts", "new");
+    forgejo.files.set("me/app@feature:src/lib/util.ts", "");
+    const harness = await setUp(config, ["me/app"]);
+
+    const onMain = await harness.executeTool<ToolResult>("read_file", { path: "src/app.ts" }, runCtx);
+    const onFeature = await harness.executeTool<ToolResult>("read_file", { path: "src/app.ts", ref: "feature" }, runCtx);
+    const directory = await harness.executeTool<ToolResult>("read_file", { path: "src/", ref: "feature" }, runCtx);
+
+    expect(onMain.data).toMatchObject({ content: "old" });
+    expect(onFeature.data).toMatchObject({ content: "new" });
+    expect(directory.data).toEqual({
+      type: "dir",
+      entries: [
+        { name: "app.ts", path: "src/app.ts", type: "file" },
+        { name: "lib", path: "src/lib", type: "dir" },
+      ],
+    });
+  });
+
+  it("refuses to show a binary file as text", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.files.set("me/app@main:logo.png", "\u0089PNG\u0000");
+    const harness = await setUp(config, ["me/app"]);
+
+    const result = await harness.executeTool<ToolResult>("read_file", { path: "logo.png" }, runCtx);
+
+    expect(result.error).toContain("logo.png is a binary file");
+  });
+
+  it("rejects a file path that would reach other parts of the Forgejo API", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    const harness = await setUp(config, ["me/app"]);
+
+    const result = await harness.executeTool<ToolResult>("read_file", { path: "../../../user" }, runCtx);
+
+    expect(result.error).toBe('"../../../user" is not a file path in the repository.');
+    expect(forgejo.requests.some((request) => request.path.includes("contents"))).toBe(false);
+  });
+});
+
 describe("pull request reviews", () => {
   const diff = [
     "diff --git a/src/app.ts b/src/app.ts",

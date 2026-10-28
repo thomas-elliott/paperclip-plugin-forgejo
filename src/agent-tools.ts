@@ -31,7 +31,10 @@ type Input = {
   path?: string;
   event?: string;
   commit?: string;
-  // Checked in review_pull_request, since Paperclip does not check inputs against the schema.
+  ref?: string;
+  // Checked in the tools that take them, since Paperclip does not check inputs against the schema.
+  labels?: unknown;
+  assignees?: unknown;
   comments?: unknown;
 };
 
@@ -92,6 +95,40 @@ function lineInDiff(fileDiff: string, line: number, side: "new" | "old"): boolea
     }
   }
   return false;
+}
+
+function nameList(value: unknown, field: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || !value.every((name) => typeof name === "string" && name !== "")) {
+    throw new Error(`${field} must be a list of names.`);
+  }
+  return value;
+}
+
+// Forgejo takes label IDs, not names, so look the names up and report any that do not exist.
+async function labelIds(ctx: PluginContext, forgejo: Forgejo, repository: string, names: string[]): Promise<number[]> {
+  if (names.length === 0) return [];
+  type Label = { id: number; name: string };
+  const labels = await forgejoPages<Label>(ctx, forgejo, `/repos/${repository}/labels`);
+  // An organisation's labels can be used in all its repositories. Forgejo answers 404 for a user.
+  try {
+    labels.push(...(await forgejoPages<Label>(ctx, forgejo, `/orgs/${repository.split("/")[0]}/labels`)));
+  } catch (error) {
+    if (!(error instanceof ForgejoError && error.status === 404)) throw error;
+  }
+  const unknown = names.filter((name) => !labels.some((label) => label.name === name));
+  if (unknown.length > 0) {
+    throw new Error(`${repository} has no label ${unknown.join(", ")}. Its labels are: ${labels.map((label) => label.name).join(", ") || "none"}.`);
+  }
+  return names.map((name) => labels.find((label) => label.name === name)!.id);
+}
+
+// A file path made safe for an API path: the path goes after the endpoint, so "." or ".." parts
+// could reach other endpoints with the operator's token.
+function encodeFilePath(path: string): string {
+  const parts = path.replace(/^\/+|\/+$/g, "").split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..")) throw new Error(`"${path}" is not a file path in the repository.`);
+  return parts.map(encodeURIComponent).join("/");
 }
 
 type Tool = (call: {
@@ -192,20 +229,56 @@ const tools: Record<string, Tool> = {
   },
 
   async create_issue({ ctx, forgejo, repository, input }) {
-    const issue = await forgejoJson<ForgejoIssueJson>(ctx, forgejo, `/repos/${await repository()}/issues`, {
+    const labels = nameList(input.labels, "labels");
+    const assignees = nameList(input.assignees, "assignees");
+    const name = await repository();
+    const issue = await forgejoJson<ForgejoIssueJson>(ctx, forgejo, `/repos/${name}/issues`, {
       method: "POST",
-      body: { title: input.title, body: input.body ?? "" },
+      body: { title: input.title, body: input.body ?? "", labels: await labelIds(ctx, forgejo, name, labels ?? []), assignees },
     });
     return issueSummary(issue);
   },
 
   async update_issue({ ctx, forgejo, repository, input }) {
-    // Forgejo's issue endpoint also edits pull requests.
-    const issue = await forgejoJson<ForgejoIssueJson>(ctx, forgejo, `/repos/${await repository()}/issues/${input.number}`, {
+    const labels = nameList(input.labels, "labels");
+    const assignees = nameList(input.assignees, "assignees");
+    const name = await repository();
+    // Set labels first, so the issue returned by the edit below shows them.
+    if (labels) {
+      await forgejoJson(ctx, forgejo, `/repos/${name}/issues/${input.number}/labels`, {
+        method: "PUT",
+        body: { labels: await labelIds(ctx, forgejo, name, labels) },
+      });
+    }
+    // Forgejo's issue endpoint also edits pull requests, including closing and reopening them.
+    const issue = await forgejoJson<ForgejoIssueJson>(ctx, forgejo, `/repos/${name}/issues/${input.number}`, {
       method: "PATCH",
-      body: { title: input.title, body: input.body, state: input.state },
+      body: { title: input.title, body: input.body, state: input.state, assignees },
     });
     return issueSummary(issue);
+  },
+
+  async list_branches({ ctx, forgejo, repository }) {
+    type Branch = { name: string; commit: { id: string }; protected: boolean };
+    const branches = await forgejoPages<Branch>(ctx, forgejo, `/repos/${await repository()}/branches`);
+    return branches.map((branch) => ({ name: branch.name, commit: branch.commit.id, protected: branch.protected }));
+  },
+
+  async read_file({ ctx, forgejo, repository, input }) {
+    type Entry = { name: string; path: string; type: string; size: number; content?: string | null };
+    const query = input.ref ? `?ref=${encodeURIComponent(input.ref)}` : "";
+    // Forgejo answers with a list for a directory.
+    const found = await forgejoJson<Entry | Entry[]>(ctx, forgejo, `/repos/${await repository()}/contents/${encodeFilePath(input.path!)}${query}`);
+    if (Array.isArray(found)) return { type: "dir", entries: found.map((entry) => ({ name: entry.name, path: entry.path, type: entry.type })) };
+    if (found.type !== "file") throw new Error(`${found.path} is a ${found.type}, not a file.`);
+    // Forgejo leaves out the content of files too large for its API.
+    if (!found.content) {
+      if (found.size === 0) return { type: "file", path: found.path, content: "" };
+      throw new Error(`${found.path} is too large for Forgejo to return (${found.size} bytes).`);
+    }
+    const bytes = Buffer.from(found.content, "base64");
+    if (bytes.includes(0)) throw new Error(`${found.path} is a binary file (${found.size} bytes), so it cannot be shown as text.`);
+    return { type: "file", path: found.path, content: bytes.toString("utf8") };
   },
 
   async create_pull_request({ ctx, runCtx, forgejo, repository, input }) {

@@ -15,7 +15,11 @@ type FakeIssue = {
   isPull?: boolean;
   merged?: boolean;
   draft?: boolean;
+  labels?: string[];
+  assignees?: string[];
 };
+
+type FakeLabel = { id: number; name: string };
 
 type FakeComment = { id: number; body: string; updatedAt: string };
 
@@ -34,6 +38,10 @@ export class FakeForgejo {
   pullFiles = new Map<string, string[]>(); // keyed "owner/repo#number"
   pullDiffs = new Map<string, string>(); // keyed "owner/repo#number"
   reviews = new Map<string, FakeReview[]>(); // keyed "owner/repo#number"
+  repositoryLabels = new Map<string, FakeLabel[]>(); // keyed "owner/repo"
+  organisationLabels = new Map<string, FakeLabel[]>(); // keyed by owner; any other owner is a user
+  branches = new Map<string, { name: string; sha: string }[]>(); // keyed "owner/repo"
+  files = new Map<string, string>(); // keyed "owner/repo@ref:path"; the default branch is main
   requests: { method: string; path: string; query: Record<string, string>; body: unknown; token?: string }[] = [];
   // The token of the account that opened every pull request, which Forgejo does not let approve them.
   // The harness resolves a secret reference to "resolved:<reference>".
@@ -101,8 +109,8 @@ export class FakeForgejo {
       state: issue.state,
       html_url: `${BASE_URL}/${repository}/${issue.isPull ? "pulls" : "issues"}/${issue.number}`,
       user: { login: "someone" },
-      labels: [],
-      assignees: null,
+      labels: (issue.labels ?? []).map((name) => ({ name })),
+      assignees: issue.assignees?.map((login) => ({ login })) ?? null,
       pull_request: issue.isPull ? { merged: Boolean(issue.merged) } : null,
       created_at: "2026-10-01T00:00:00Z",
       updated_at: issue.updatedAt,
@@ -145,6 +153,8 @@ export class FakeForgejo {
 
     const review = this.handleReview(path, method, body, token, page);
     if (review) return review;
+    const content = this.handleContent(path, searchParams, page);
+    if (content) return content;
 
     // The main token belongs to the account that opens pull requests; any other token to the reviewer.
     if (path === "/user") return Response.json({ login: token === this.pullAuthorToken ? "someone" : "reviewer" });
@@ -157,7 +167,7 @@ export class FakeForgejo {
 
     if (path === "/user/repos") return Response.json(page > 1 ? [] : [...this.issues.keys()].map((name) => this.repositoryJson(name)));
 
-    const match = /^\/repos\/([^/]+\/[^/]+)\/(issues|pulls)(?:\/(\d+))?(?:\/(merge|comments|files))?$/.exec(path);
+    const match = /^\/repos\/([^/]+\/[^/]+)\/(issues|pulls)(?:\/(\d+))?(?:\/(merge|comments|files|labels))?$/.exec(path);
     const issues = match && this.issues.get(match[1]);
     if (!match || !issues) return Response.json({ message: "not found" }, { status: 404 });
     const [, repository, kind, number, action] = match;
@@ -186,6 +196,19 @@ export class FakeForgejo {
       issues.push(pull);
       return Response.json(this.issueJson(repository, pull), { status: 201 });
     }
+    if (!number && method === "POST") {
+      const issue = {
+        number: issues.length + 1,
+        title: body.title,
+        body: body.body,
+        state: "open" as const,
+        updatedAt: this.tick(),
+        labels: this.labelNames(repository, body.labels),
+        assignees: body.assignees,
+      };
+      issues.push(issue);
+      return Response.json(this.issueJson(repository, issue), { status: 201 });
+    }
     if (!number) {
       if (this.broken.has(repository)) return Response.json({ message: "broken" }, { status: 500 });
       const state = searchParams.get("state");
@@ -200,8 +223,52 @@ export class FakeForgejo {
       issue.state = "closed";
       return new Response(null, { status: 200 });
     }
+    if (action === "labels" && method === "PUT") {
+      issue.labels = this.labelNames(repository, body.labels);
+      return Response.json(issue.labels.map((name) => ({ name })));
+    }
     if (method === "PATCH") Object.assign(issue, body, { updatedAt: this.tick() });
     return Response.json(this.issueJson(repository, issue));
+  }
+
+  private labelNames(repository: string, ids: number[] = []) {
+    const labels = [...(this.repositoryLabels.get(repository) ?? []), ...(this.organisationLabels.get(repository.split("/")[0]) ?? [])];
+    return ids.map((id) => labels.find((label) => label.id === id)!.name);
+  }
+
+  // Labels, branches and file contents.
+  private handleContent(path: string, searchParams: URLSearchParams, page: number) {
+    const organisation = /^\/orgs\/([^/]+)\/labels$/.exec(path);
+    if (organisation) {
+      const labels = this.organisationLabels.get(organisation[1]);
+      if (!labels) return Response.json({ message: "not found" }, { status: 404 });
+      return Response.json(page > 1 ? [] : labels);
+    }
+    const match = /^\/repos\/([^/]+\/[^/]+)\/(labels|branches|contents\/(.+))$/.exec(path);
+    if (!match) return undefined;
+    const [, repository, kind, filePath] = match;
+    if (kind === "labels") return Response.json(page > 1 ? [] : (this.repositoryLabels.get(repository) ?? []));
+    if (kind === "branches") {
+      const branches = (this.branches.get(repository) ?? []).map((branch) => ({ name: branch.name, commit: { id: branch.sha }, protected: branch.name === "main" }));
+      return Response.json(page > 1 ? [] : branches);
+    }
+    const prefix = `${repository}@${searchParams.get("ref") ?? "main"}:`;
+    const wanted = decodeURIComponent(filePath);
+    const file = this.files.get(prefix + wanted);
+    if (file !== undefined) {
+      const size = Buffer.byteLength(file);
+      return Response.json({ name: wanted.split("/").pop(), path: wanted, type: "file", size, content: Buffer.from(file).toString("base64") });
+    }
+    const inside = [...this.files.keys()].filter((key) => key.startsWith(`${prefix}${wanted}/`)).map((key) => key.slice(prefix.length));
+    if (inside.length === 0) return Response.json({ message: "object does not exist" }, { status: 404 });
+    // Each file directly in the directory, and each directory below it once.
+    const names = [...new Set(inside.map((entry) => entry.slice(wanted.length + 1).split("/")[0]))];
+    return Response.json(
+      names.map((name) => {
+        const entryPath = `${wanted}/${name}`;
+        return { name, path: entryPath, type: inside.includes(entryPath) ? "file" : "dir", size: 0 };
+      }),
+    );
   }
 
   private reviewJson(review: FakeReview) {
