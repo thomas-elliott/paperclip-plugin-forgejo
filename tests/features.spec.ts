@@ -49,13 +49,13 @@ async function issueTitles(harness: ReturnType<typeof createTestHarness>, compan
 
 // A Forgejo issue event signed the way Forgejo signs it. The harness resolves a secret reference to
 // "resolved:<reference>", so "resolved:hook-ref" is the configured webhook secret.
-function delivery(payload: unknown, secret = "resolved:hook-ref") {
+function delivery(payload: unknown, secret = "resolved:hook-ref", event = "issues") {
   const rawBody = JSON.stringify(payload);
   return {
     endpointKey: "forgejo",
     requestId: "delivery-1",
     rawBody,
-    headers: { "x-forgejo-event": "issues", "x-forgejo-signature": createHmac("sha256", secret).update(rawBody).digest("hex") },
+    headers: { "x-forgejo-event": event, "x-forgejo-signature": createHmac("sha256", secret).update(rawBody).digest("hex") },
   };
 }
 
@@ -188,7 +188,8 @@ describe("agent tools", () => {
   it("lists each comment once, though Forgejo ignores paging for comments", { timeout: 2000 }, async () => {
     const forgejo = new FakeForgejo(["me/app"]);
     forgejo.addIssue("me/app", { number: 4 });
-    forgejo.comments.set("me/app#4", ["First", "Second"]);
+    forgejo.addComment("me/app", 4, "First");
+    forgejo.addComment("me/app", 4, "Second");
     const harness = await setUp(config, ["me/app"]);
 
     const result = await harness.executeTool<ToolResult>("list_comments", { number: 4 }, runCtx);
@@ -535,6 +536,66 @@ describe("issue sync", () => {
     await plugin.definition.onWebhook!(delivery(issueEvent(forgejo, "edited", { number: 1, title: "Renamed", state: "closed" })));
 
     expect((await paperclipIssues(harness))[0].status).toBe("todo");
+  });
+});
+
+describe("comment copy", () => {
+  // Reading comments back would need a capability the plugin does not use, so this records the bodies posted.
+  function copiedComments(harness: Awaited<ReturnType<typeof setUp>>) {
+    const createComment = vi.spyOn(harness.ctx.issues, "createComment");
+    return () => createComment.mock.calls.map(([, body]) => body);
+  }
+
+  it("copies an issue's comments when importing it, oldest first, with author and link", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.addIssue("me/app", { number: 1 });
+    forgejo.addComment("me/app", 1, "First");
+    forgejo.addComment("me/app", 1, "Second");
+    const harness = await setUp(config, ["me/app"]);
+    const copied = copiedComments(harness);
+
+    await harness.runJob("sync-issues");
+    await harness.runJob("sync-issues");
+
+    expect(copied()).toEqual([
+      `**someone** [commented in Forgejo](${BASE_URL}/me/app/issues/1#issuecomment-100):\n\nFirst`,
+      `**someone** [commented in Forgejo](${BASE_URL}/me/app/issues/1#issuecomment-101):\n\nSecond`,
+    ]);
+  });
+
+  it("catches up on new comments in the sync, reading only those since the last one seen", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.addIssue("me/app", { number: 1 });
+    forgejo.addIssue("me/app", { number: 2, isPull: true });
+    forgejo.addComment("me/app", 1, "Before import");
+    const harness = await setUp(config, ["me/app"]);
+    await harness.runJob("sync-issues");
+    const copied = copiedComments(harness);
+
+    forgejo.addComment("me/app", 1, "Missed by the webhook");
+    forgejo.addComment("me/app", 2, "On a pull request");
+    await harness.runJob("sync-issues");
+
+    expect(copied()).toEqual([expect.stringContaining("Missed by the webhook")]);
+    const sinces = forgejo.requests.filter((request) => request.path === "/repos/me/app/issues/comments").map((request) => request.query.since);
+    expect(sinces).toContain(forgejo.comments.get("me/app#1")![0].updatedAt);
+  });
+
+  it("copies a comment from a webhook delivery once, and ignores edits", async () => {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.addIssue("me/app", { number: 1 });
+    const harness = await setUp(config, ["me/app"]);
+    await harness.runJob("sync-issues");
+    const copied = copiedComments(harness);
+
+    forgejo.addComment("me/app", 1, "Hello");
+    const [comment] = (await (await fetch(`${BASE_URL}/api/v1/repos/me/app/issues/1/comments`)).json()) as unknown[];
+    const event = (action: string) => ({ ...issueEvent(forgejo, action, { number: 1, title: "Issue 1", state: "open" }), comment });
+    await plugin.definition.onWebhook!(delivery(event("created"), undefined, "issue_comment"));
+    await plugin.definition.onWebhook!(delivery(event("edited"), undefined, "issue_comment"));
+    await harness.runJob("sync-issues");
+
+    expect(copied()).toEqual([expect.stringContaining("Hello")]);
   });
 });
 
