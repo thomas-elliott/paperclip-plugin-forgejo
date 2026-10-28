@@ -17,6 +17,8 @@ type FakeIssue = {
   draft?: boolean;
 };
 
+type FakeComment = { id: number; body: string; updatedAt: string };
+
 type FakeReview = {
   id: number;
   login: string;
@@ -28,11 +30,11 @@ type FakeReview = {
 
 export class FakeForgejo {
   issues = new Map<string, FakeIssue[]>();
-  comments = new Map<string, string[]>(); // keyed "owner/repo#number"
+  comments = new Map<string, FakeComment[]>(); // keyed "owner/repo#number"
   pullFiles = new Map<string, string[]>(); // keyed "owner/repo#number"
   pullDiffs = new Map<string, string>(); // keyed "owner/repo#number"
   reviews = new Map<string, FakeReview[]>(); // keyed "owner/repo#number"
-  requests: { method: string; path: string; body: unknown; token?: string }[] = [];
+  requests: { method: string; path: string; query: Record<string, string>; body: unknown; token?: string }[] = [];
   // The token of the account that opened every pull request, which Forgejo does not let approve them.
   // The harness resolves a secret reference to "resolved:<reference>".
   pullAuthorToken = "resolved:token-ref";
@@ -52,6 +54,13 @@ export class FakeForgejo {
 
   addIssue(repository: string, issue: Partial<FakeIssue> & { number: number }) {
     this.issues.get(repository)!.push({ title: `Issue ${issue.number}`, body: "", state: "open", updatedAt: "2026-10-01T00:00:00Z", ...issue });
+  }
+
+  // Comment IDs count up across the whole server, as in Forgejo.
+  private nextCommentId = 100;
+  addComment(repository: string, number: number, body: string) {
+    const key = `${repository}#${number}`;
+    this.comments.set(key, [...(this.comments.get(key) ?? []), { id: this.nextCommentId++, body, updatedAt: this.tick() }]);
   }
 
   issue(repository: string, number: number) {
@@ -104,6 +113,20 @@ export class FakeForgejo {
     };
   }
 
+  private commentJson(repository: string, number: number, comment: FakeComment) {
+    const issue = this.issue(repository, number)!;
+    const page = `${BASE_URL}/${repository}/${issue.isPull ? "pulls" : "issues"}/${number}`;
+    return {
+      id: comment.id,
+      body: comment.body,
+      html_url: `${page}#issuecomment-${comment.id}`,
+      issue_url: issue.isPull ? "" : page,
+      user: { login: "someone" },
+      created_at: comment.updatedAt,
+      updated_at: comment.updatedAt,
+    };
+  }
+
   private async handle(url: string, init?: RequestInit): Promise<Response> {
     if (this.unreachable) throw new TypeError("fetch failed");
     const { pathname, searchParams } = new URL(url);
@@ -111,7 +134,7 @@ export class FakeForgejo {
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     const token = new Headers(init?.headers).get("Authorization")?.replace(/^token /, "");
-    this.requests.push({ method, path, body, token });
+    this.requests.push({ method, path, query: Object.fromEntries(searchParams), body, token });
     const overridden = this.override?.(path);
     if (overridden) return overridden;
     // List endpoints serve everything on page 1, so the plugin's paging stops on page 2.
@@ -128,8 +151,18 @@ export class FakeForgejo {
     const [, repository, kind, number, action] = match;
     const key = `${repository}#${number}`;
 
-    // Forgejo's comment list ignores paging and always returns every comment.
-    if (action === "comments") return Response.json((this.comments.get(key) ?? []).map((body, id) => ({ id, body, user: { login: "someone" }, created_at: "2026-10-01T00:00:00Z" })));
+    // The repository's comments, those updated at or after since, with paging.
+    if (action === "comments" && !number) {
+      const since = searchParams.get("since");
+      const all = [...this.comments].flatMap(([commentKey, comments]) => {
+        const [commentRepository, commentNumber] = commentKey.split("#");
+        if (commentRepository !== repository) return [];
+        return comments.filter((comment) => !since || Date.parse(comment.updatedAt) >= Date.parse(since)).map((comment) => this.commentJson(repository, Number(commentNumber), comment));
+      });
+      return Response.json(page > 1 ? [] : all.sort((a, b) => a.id - b.id));
+    }
+    // Forgejo's comment list for one issue ignores paging and always returns every comment.
+    if (action === "comments") return Response.json((this.comments.get(key) ?? []).map((comment) => this.commentJson(repository, Number(number), comment)));
     // Forgejo's file list answers null, not [], for a page past the end (routers/api/v1/repo/pull.go).
     if (action === "files") {
       const files = (this.pullFiles.get(key) ?? []).map((filename) => ({ filename, status: "modified", additions: 1, deletions: 0 }));

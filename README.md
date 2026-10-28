@@ -22,7 +22,8 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
 - With **Import Forgejo issues** turned on, each project imports the open issues of the Forgejo
   repositories it uses, every five minutes or straight away through a webhook. Titles and
   descriptions follow Forgejo. Closing an issue on either side closes it on the other, and reopening
-  it in Forgejo reopens it in Paperclip. Comments are not copied.
+  it in Forgejo reopens it in Paperclip. Comments made in Forgejo are copied to the Paperclip issue;
+  comments made in Paperclip stay in Paperclip.
 - Your Forgejo access token and webhook secret are stored as Paperclip secrets, not in plain settings.
 
 ## Limitations
@@ -48,6 +49,11 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
   agent's pull request unless you set a reviewer access token. See
   [Let agents approve pull requests](#let-agents-approve-pull-requests).
 - Reopening an imported issue in Paperclip does not reopen it in Forgejo.
+- A comment copied from Forgejo does not wake the issue's assignee: Paperclip never lets a plugin's
+  comments do that. Editing or deleting a comment in Forgejo after it was copied does not change the
+  copy.
+- Comments agents post to Forgejo are copied back to their Paperclip issue too. Agents and people
+  can share the access token's Forgejo account, so the plugin cannot tell their comments apart.
 - When a webhook delivery's secret does not match, Paperclip answers Forgejo with HTTP 502, so
   Forgejo shows a server error rather than an authentication error. Paperclip records the delivery
   as failed with the real reason.
@@ -108,14 +114,15 @@ Forgejo repositories it uses.
 
 ### Update imported issues straight away
 
-Without a webhook, imported issues update every five minutes. To update them straight away:
+Without a webhook, imported issues and their comments update every five minutes. To update them
+straight away:
 
 1. Choose a long random secret and save it in the plugin settings as **Webhook secret**.
 2. In Forgejo, open the repository's or organisation's Settings, Webhooks, and add a Forgejo webhook:
    - Target URL: `https://your-paperclip.example.com/api/plugins/paperclip-plugin-forgejo/webhooks/forgejo`
    - HTTP method: POST, content type: `application/json`
    - Secret: the same secret
-   - Trigger on: custom events, then **Issues**
+   - Trigger on: custom events, then **Issues** and **Issue comment**
 3. Use Test Delivery in Forgejo. Paperclip records each delivery. A delivery fails if the secret does
    not match.
 
@@ -180,6 +187,7 @@ it out. The plugin builds on these extension points instead:
 | React to Forgejo events | webhooks | `webhooks.receive` |
 | Show live status of pasted Forgejo PR and issue links | `objectReferences` | `external.objects.detect`, `external.objects.read` |
 | Sync Forgejo issues into Paperclip | `ctx.issues`, a scheduled job, `issue.updated` events | `issues.read`, `issues.create`, `issues.update`, `jobs.schedule`, `events.subscribe` |
+| Copy Forgejo comments into imported issues | `ctx.issues.createComment` | `issue.comments.create` |
 | Remember sync state | `ctx.state` | `plugin.state.read`, `plugin.state.write` |
 
 The project tab recognises a workspace by any address Forgejo gives the repository: the HTTPS clone

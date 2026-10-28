@@ -63,6 +63,34 @@ async function closeInForgejo(ctx: PluginContext, forgejo: Forgejo, issue: Issue
   await setSyncRecord(ctx, issue.id, { ...record, state: "closed" });
 }
 
+type ForgejoCommentJson = {
+  id: number;
+  body: string;
+  html_url: string;
+  // The issue's web address, or "" for a comment on a pull request.
+  issue_url: string;
+  user: { login: string };
+  updated_at: string;
+};
+
+// The ID of the newest Forgejo comment copied to a Paperclip issue. Forgejo comment IDs only go up,
+// so a comment with a higher ID has not been copied yet.
+function lastCopiedCommentKey(issueId: string) {
+  return { scopeKind: "issue" as const, scopeId: issueId, stateKey: "forgejo-last-comment" };
+}
+
+// Copies the comments newer than the last one copied, oldest first. Callers hold the issue's turn in
+// oneAtATime, so the webhook and the sync job cannot both copy the same comment.
+async function copyNewComments(ctx: PluginContext, companyId: string, issueId: string, comments: ForgejoCommentJson[]) {
+  const lastCopied = ((await ctx.state.get(lastCopiedCommentKey(issueId))) as number | null) ?? 0;
+  const newComments = comments.filter((comment) => comment.id > lastCopied).sort((a, b) => a.id - b.id);
+  for (const comment of newComments) {
+    await ctx.issues.createComment(issueId, `**${comment.user.login}** [commented in Forgejo](${comment.html_url}):\n\n${comment.body}`, companyId);
+    // Saved after each comment, so a failure part-way does not copy the earlier ones again.
+    await ctx.state.set(lastCopiedCommentKey(issueId), comment.id);
+  }
+}
+
 // Webhooks and the sync job run in the same worker process. Chaining the work for one issue keeps
 // two of them from importing or updating it at the same time.
 const queues = new Map<string, Promise<unknown>>();
@@ -77,12 +105,16 @@ async function oneAtATime(key: string, work: () => Promise<void>) {
   }
 }
 
+function issueTurn(target: Target, number: number) {
+  return `${target.projectId}:${issueKey(target.repository, number)}`;
+}
+
 // Brings one Paperclip issue in line with its Forgejo issue, importing it if it was never imported.
 // Title and description follow Forgejo. A close in Forgejo closes the Paperclip issue and a reopen
 // reopens it. A close in Paperclip that did not reach Forgejo is sent again.
 async function applyForgejoIssue(ctx: PluginContext, forgejo: Forgejo, target: Target, issue: ForgejoIssueJson, existing: Issue | undefined) {
   const key = issueKey(target.repository, issue.number);
-  await oneAtATime(`${target.projectId}:${key}`, async () => {
+  await oneAtATime(issueTurn(target, issue.number), async () => {
     const descriptionFingerprint = fingerprint(description(issue));
 
     if (!existing) {
@@ -101,6 +133,9 @@ async function applyForgejoIssue(ctx: PluginContext, forgejo: Forgejo, target: T
       });
       await ctx.entities.upsert({ entityType: IMPORTED_ISSUE, scopeKind: "project", scopeId: target.projectId, externalId: key, data: { issueId: created.id } });
       await setSyncRecord(ctx, created.id, { state: "open", descriptionFingerprint });
+      // Forgejo's comment list for one issue ignores paging and returns every comment.
+      const comments = await forgejoJson<ForgejoCommentJson[]>(ctx, forgejo, `/repos/${target.repository}/issues/${issue.number}/comments`);
+      await copyNewComments(ctx, target.companyId, created.id, comments);
       return;
     }
 
@@ -139,7 +174,7 @@ async function syncedIssues(ctx: PluginContext, companyId: string, projectId: st
 }
 
 // Syncs one repository into every project of a company that uses it, fetching its issues once.
-async function syncRepository(ctx: PluginContext, forgejo: Forgejo, repository: string, targets: Target[]) {
+async function syncRepository(ctx: PluginContext, forgejo: Forgejo, companyId: string, repository: string, targets: Target[]) {
   const openIssues = await forgejoPages<ForgejoIssueJson>(ctx, forgejo, `/repos/${repository}/issues?state=open&type=issues`);
   const prefix = `${repository.toLowerCase()}#`;
 
@@ -168,6 +203,41 @@ async function syncRepository(ctx: PluginContext, forgejo: Forgejo, repository: 
       }
     }
   }
+
+  await copyMissedComments(ctx, forgejo, companyId, repository, targets);
+}
+
+// Where the last catch-up stopped in a repository's comments: the newest updated_at it saw, by
+// Forgejo's clock, so a difference between the two servers' clocks cannot skip a comment.
+function commentsSeenUntilKey(companyId: string, repository: string) {
+  return { scopeKind: "company" as const, scopeId: companyId, stateKey: `forgejo-comments-seen-until:${repository.toLowerCase()}` };
+}
+
+// Copies comments the webhook missed, such as those made while it was not set up, fetching the
+// repository's comments once for every project. The first catch-up reads every comment.
+async function copyMissedComments(ctx: PluginContext, forgejo: Forgejo, companyId: string, repository: string, targets: Target[]) {
+  const seenUntilKey = commentsSeenUntilKey(companyId, repository);
+  const seenUntil = (await ctx.state.get(seenUntilKey)) as string | null;
+  const since = seenUntil ? `?since=${encodeURIComponent(seenUntil)}` : "";
+  const comments = await forgejoPages<ForgejoCommentJson>(ctx, forgejo, `/repos/${repository}/issues/comments${since}`);
+
+  const byNumber = new Map<number, ForgejoCommentJson[]>();
+  for (const comment of comments) {
+    const number = /\/issues\/(\d+)$/.exec(comment.issue_url)?.[1];
+    if (number) byNumber.set(Number(number), [...(byNumber.get(Number(number)) ?? []), comment]);
+  }
+  for (const target of targets) {
+    for (const [number, issueComments] of byNumber) {
+      const [existing] = await syncedIssues(ctx, target.companyId, target.projectId, issueKey(target.repository, number));
+      if (existing) await oneAtATime(issueTurn(target, number), () => copyNewComments(ctx, target.companyId, existing.id, issueComments));
+    }
+  }
+
+  let newest = seenUntil;
+  for (const comment of comments) {
+    if (!newest || Date.parse(comment.updated_at) > Date.parse(newest)) newest = comment.updated_at;
+  }
+  if (newest) await ctx.state.set(seenUntilKey, newest);
 }
 
 // The projects that use a repository, each with the repository name as Forgejo spells it.
@@ -198,7 +268,7 @@ export async function syncAllCompanies(ctx: PluginContext) {
       }
       for (const [repository, repositoryTargets] of byRepository) {
         try {
-          await syncRepository(ctx, forgejo, repository, repositoryTargets);
+          await syncRepository(ctx, forgejo, companyId, repository, repositoryTargets);
         } catch (error) {
           failures.push(`${repository} in company ${companyId}: ${errorMessage(error)}`);
         }
@@ -237,7 +307,8 @@ function signatureMatches(secret: string, rawBody: string, signature: string | u
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-type IssueEventPayload = { action: string; issue: ForgejoIssueJson; repository: ForgejoRepositoryJson };
+// Forgejo sends "issues" events for changes to an issue and "issue_comment" events for its comments.
+type IssueEventPayload = { action: string; issue: ForgejoIssueJson; repository: ForgejoRepositoryJson; comment?: ForgejoCommentJson };
 
 // Returns whether this company's webhook secret signed the delivery, after handling it if so.
 async function deliverToCompany(ctx: PluginContext, companyId: string, input: PluginWebhookInput): Promise<boolean> {
@@ -249,10 +320,19 @@ async function deliverToCompany(ctx: PluginContext, companyId: string, input: Pl
 
   const event = header(input, "x-forgejo-event") ?? header(input, "x-gitea-event");
   const payload = JSON.parse(input.rawBody) as IssueEventPayload;
-  if (event !== "issues" || !forgejo.syncIssues || payload.issue.pull_request || payload.action === "deleted") return true;
+  const issueChanged = event === "issues" && payload.action !== "deleted";
+  // Edited and deleted comments are not copied.
+  const newComment = event === "issue_comment" && payload.action === "created" ? payload.comment : undefined;
+  if ((!issueChanged && !newComment) || !forgejo.syncIssues || payload.issue.pull_request) return true;
+
   for (const target of await projectsUsing(ctx, companyId, [payload.repository])) {
     const [existing] = await syncedIssues(ctx, companyId, target.projectId, issueKey(target.repository, payload.issue.number));
-    await applyForgejoIssue(ctx, forgejo, target, payload.issue, existing);
+    if (newComment && existing) {
+      await oneAtATime(issueTurn(target, payload.issue.number), () => copyNewComments(ctx, companyId, existing.id, [newComment]));
+    } else {
+      // Importing an issue also copies its comments, including a new one.
+      await applyForgejoIssue(ctx, forgejo, target, payload.issue, existing);
+    }
   }
   return true;
 }
