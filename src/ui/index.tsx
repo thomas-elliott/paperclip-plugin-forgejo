@@ -40,7 +40,6 @@ const styles = {
     borderRadius: "var(--radius-md)",
   },
   button: {
-    justifySelf: "start",
     padding: `${space(2)} ${space(3)}`,
     fontSize: "var(--text-sm)",
     fontWeight: "var(--font-weight-medium)",
@@ -50,6 +49,9 @@ const styles = {
     borderRadius: "var(--radius-md)",
     cursor: "pointer",
   },
+  actions: { display: "flex", gap: space(2) },
+  // Overrides the colours of `button`.
+  secondaryButton: { color: "var(--foreground)", background: "var(--background)", border: "1px solid var(--border)" },
   code: { fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" },
 } satisfies Record<string, CSSProperties>;
 
@@ -82,24 +84,42 @@ export function DashboardWidget({ context }: PluginWidgetProps) {
   );
 }
 
-// Plugins may not create project workspaces, so the tab builds the CLI command for the user to run.
+function workspacePayload(repository: ForgejoRepository) {
+  return { name: repository.fullName.split("/").pop(), sourceType: "git_repo", repoUrl: repository.cloneUrl };
+}
+
+// Plugins may not create project workspaces, so the tab offers the CLI command as the supported route.
 function workspaceCommand(projectId: string, repository: ForgejoRepository): string {
-  const payload = JSON.stringify({
-    name: repository.fullName.split("/").pop(),
-    sourceType: "git_repo",
-    repoUrl: repository.cloneUrl,
-  });
+  const payload = JSON.stringify(workspacePayload(repository));
   return `npx paperclipai project-workspace create ${projectId} --api-base ${window.location.origin} --payload-json '${payload}'`;
+}
+
+// Unsupported: plugin UI runs inside Paperclip's page, so it can call the endpoint the CLI uses with the viewer's
+// session. This is not part of the plugin API and may break when Paperclip changes.
+async function createWorkspace(projectId: string, repository: ForgejoRepository): Promise<void> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/workspaces`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(workspacePayload(repository)),
+  });
+  if (response.ok) return;
+
+  const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
+  const detail = typeof body?.error === "string" ? body.error : `HTTP ${response.status}`;
+  throw new Error(detail);
 }
 
 export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
   const projectId = context.entityId;
-  const { data, loading, error } = usePluginData<ProjectRepositories>("projectRepositories", {
+  const { data, loading, error, refresh } = usePluginData<ProjectRepositories>("projectRepositories", {
     companyId: context.companyId,
     projectId,
   });
   const [selected, setSelected] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [addState, setAddState] = useState<{ status: "idle" | "adding" } | { status: "failed"; reason: string }>({
+    status: "idle",
+  });
 
   if (loading) return <Spinner label="Loading Forgejo repositories" />;
   if (error) return <NotConnected reason={`Could not load Forgejo repositories: ${error.message}`} />;
@@ -114,6 +134,19 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
       setCopyState("copied");
     } catch {
       setCopyState("failed");
+    }
+  }
+
+  async function addWorkspace() {
+    if (!repository) return;
+    setAddState({ status: "adding" });
+    try {
+      await createWorkspace(projectId, repository);
+      setSelected("");
+      setAddState({ status: "idle" });
+      refresh();
+    } catch (failure) {
+      setAddState({ status: "failed", reason: failure instanceof Error ? failure.message : String(failure) });
     }
   }
 
@@ -142,6 +175,7 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
           onChange={(event) => {
             setSelected(event.target.value);
             setCopyState("idle");
+            setAddState({ status: "idle" });
           }}
         >
           <option value="">Choose a repository…</option>
@@ -156,16 +190,28 @@ export function ProjectRepositoryTab({ context }: PluginDetailTabProps) {
 
         {repository && (
           <>
-            <p style={styles.muted}>Paperclip does not let plugins create workspaces. Run this command to add it:</p>
-            <pre style={styles.command}>{command}</pre>
-            <button type="button" style={styles.button} onClick={copyCommand}>
-              {copyState === "copied" ? "Copied" : "Copy command"}
-            </button>
-            {copyState === "failed" && (
+            <div style={styles.actions}>
+              <button type="button" style={styles.button} onClick={addWorkspace} disabled={addState.status === "adding"}>
+                {addState.status === "adding" ? "Adding…" : "Add (experimental)"}
+              </button>
+              <button type="button" style={{ ...styles.button, ...styles.secondaryButton }} onClick={copyCommand}>
+                {copyState === "copied" ? "Copied" : "Copy command"}
+              </button>
+            </div>
+            {addState.status === "failed" && (
               <p role="alert" style={styles.muted}>
-                Could not copy. Select the command above and copy it yourself.
+                Paperclip did not add the workspace: {addState.reason}. Run the command below instead.
               </p>
             )}
+            {copyState === "failed" && (
+              <p role="alert" style={styles.muted}>
+                Could not copy. Select the command below and copy it yourself.
+              </p>
+            )}
+            <p style={styles.muted}>
+              Add uses an unsupported API and may break after updates. Otherwise run the command in your terminal:
+            </p>
+            <pre style={styles.command}>{command}</pre>
           </>
         )}
       </section>
