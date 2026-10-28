@@ -196,6 +196,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "issues.create",
     "issues.update",
     "issue.comments.create",
+    "issues.wakeup",
+    "agents.read",
     "plugin.state.read",
     "plugin.state.write",
     "events.subscribe",
@@ -272,7 +274,7 @@ const manifest: PaperclipPluginManifestV1 = {
     {
       endpointKey: "forgejo",
       displayName: "Forgejo events",
-      description: "Receives issue events from a Forgejo webhook so synced issues update straight away",
+      description: "Receives Forgejo events, so synced issues update straight away and assignments, review requests and mentions wake agents",
     },
   ],
   objectReferences: [

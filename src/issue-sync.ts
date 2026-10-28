@@ -16,9 +16,10 @@ import {
   type ForgejoIssueJson,
   type ForgejoRepositoryJson,
 } from "./forgejo.js";
+import { startRequestedWork, type DeliveryPayload } from "./work-requests.js";
 
 // Paperclip only lets a plugin use origins under its own ID. originId is an issueKey.
-const ISSUE_ORIGIN = `plugin:${manifest.id}:issue` as const;
+export const ISSUE_ORIGIN = `plugin:${manifest.id}:issue` as const;
 
 // Each import is recorded, because Paperclip leaves hidden issues out of issues.list: without the
 // record, an issue someone hid would be imported again.
@@ -95,7 +96,7 @@ async function copyNewComments(ctx: PluginContext, companyId: string, issueId: s
 // two of them from importing or updating it at the same time.
 const queues = new Map<string, Promise<unknown>>();
 
-async function oneAtATime(key: string, work: () => Promise<void>) {
+export async function oneAtATime(key: string, work: () => Promise<void>) {
   const run = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(work);
   queues.set(key, run);
   try {
@@ -243,7 +244,7 @@ async function copyMissedComments(ctx: PluginContext, forgejo: Forgejo, companyI
 // The projects that use a repository, each with the repository name as Forgejo spells it.
 // listWorkspaces is called per project rather than reading project.workspaces, because only it
 // returns the workspace fields Paperclip has cleaned for plugins.
-async function projectsUsing(ctx: PluginContext, companyId: string, repositories: ForgejoRepositoryJson[]): Promise<Target[]> {
+export async function projectsUsing(ctx: PluginContext, companyId: string, repositories: ForgejoRepositoryJson[]): Promise<Target[]> {
   const targets: Target[] = [];
   for (const project of await ctx.projects.list({ companyId })) {
     const workspaces = await ctx.projects.listWorkspaces(project.id, companyId);
@@ -318,12 +319,20 @@ async function deliverToCompany(ctx: PluginContext, companyId: string, input: Pl
   const signature = header(input, "x-forgejo-signature") ?? header(input, "x-gitea-signature");
   if (!signatureMatches(secret, input.rawBody, signature)) return false;
 
-  const event = header(input, "x-forgejo-event") ?? header(input, "x-gitea-event");
-  const payload = JSON.parse(input.rawBody) as IssueEventPayload;
+  const event = header(input, "x-forgejo-event") ?? header(input, "x-gitea-event") ?? "";
+  const payload = JSON.parse(input.rawBody) as IssueEventPayload & DeliveryPayload;
+  // Synced first, so a request on a new issue finds it imported.
+  if (forgejo.syncIssues) await syncFromDelivery(ctx, forgejo, companyId, event, payload);
+  const deliveryId = header(input, "x-forgejo-delivery") ?? header(input, "x-gitea-delivery") ?? input.requestId;
+  await startRequestedWork(ctx, forgejo, companyId, event, payload, deliveryId);
+  return true;
+}
+
+async function syncFromDelivery(ctx: PluginContext, forgejo: Forgejo, companyId: string, event: string, payload: IssueEventPayload) {
   const issueChanged = event === "issues" && payload.action !== "deleted";
   // Edited and deleted comments are not copied.
   const newComment = event === "issue_comment" && payload.action === "created" ? payload.comment : undefined;
-  if ((!issueChanged && !newComment) || !forgejo.syncIssues || payload.issue.pull_request) return true;
+  if ((!issueChanged && !newComment) || payload.issue.pull_request) return;
 
   for (const target of await projectsUsing(ctx, companyId, [payload.repository])) {
     const [existing] = await syncedIssues(ctx, companyId, target.projectId, issueKey(target.repository, payload.issue.number));
@@ -334,7 +343,6 @@ async function deliverToCompany(ctx: PluginContext, companyId: string, input: Pl
       await applyForgejoIssue(ctx, forgejo, target, payload.issue, existing);
     }
   }
-  return true;
 }
 
 // Webhook deliveries carry no company, so each company whose webhook secret signs the body gets the
