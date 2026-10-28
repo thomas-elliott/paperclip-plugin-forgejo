@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PluginWorkspace, Project, ToolResult } from "@paperclipai/plugin-sdk";
+import type { Issue, PluginWorkspace, Project, ToolResult } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
@@ -255,6 +255,45 @@ describe("agent tools", () => {
     const result = await harness.executeTool<ToolResult>("get_issue", { number: 4 }, runCtx);
 
     expect(result.data).toMatchObject({ title: "Over SSH" });
+  });
+
+  describe("opening a pull request", () => {
+    const agentRun = { ...runCtx, agentId: "agent-1", runId: "run-1" };
+    const pullInput = { head: "feature", base: "main", title: "Add a feature" };
+
+    // Two tasks assigned to the agent; only "task-current" is checked out by this run.
+    async function setUpTasks() {
+      new FakeForgejo(["me/app"]);
+      const harness = await setUp(config, ["me/app"]);
+      const task = { companyId: "co-1", projectId: "project-1", assigneeAgentId: "agent-1", executionRunId: null };
+      harness.seed({
+        issues: [
+          { ...task, id: "task-old", identifier: "PAP-1", checkoutRunId: "run-0" },
+          { ...task, id: "task-current", identifier: "PAP-2", checkoutRunId: "run-1" },
+        ] as Issue[],
+      });
+      return harness;
+    }
+
+    it("posts the pull request's link on the task the run is working on", async () => {
+      const harness = await setUpTasks();
+      // Reading comments back would need a capability the plugin does not use.
+      const createComment = vi.spyOn(harness.ctx.issues, "createComment");
+
+      const result = await harness.executeTool<ToolResult>("create_pull_request", pullInput, agentRun);
+
+      expect(result.data).toMatchObject({ number: 1, linkedTask: "PAP-2" });
+      expect(createComment.mock.calls).toEqual([["task-current", `Opened pull request ${BASE_URL}/me/app/pulls/1`, "co-1"]]);
+    });
+
+    it("still returns the pull request when the run has no task to link it to", async () => {
+      const harness = await setUpTasks();
+
+      const result = await harness.executeTool<ToolResult>("create_pull_request", pullInput, { ...agentRun, runId: "run-other" });
+
+      expect(result.error).toBeUndefined();
+      expect(result.data).toMatchObject({ number: 1, linkedTask: null });
+    });
   });
 
   it("refuses to merge until merging is allowed in the settings", async () => {

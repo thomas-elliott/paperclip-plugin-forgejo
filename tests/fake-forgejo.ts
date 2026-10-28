@@ -136,6 +136,11 @@ export class FakeForgejo {
       return Response.json(page > 1 || files.length === 0 ? null : files);
     }
 
+    if (!number && kind === "pulls" && method === "POST") {
+      const pull = { number: issues.length + 1, title: body.title, body: body.body, state: "open" as const, updatedAt: this.tick(), isPull: true };
+      issues.push(pull);
+      return Response.json(this.issueJson(repository, pull), { status: 201 });
+    }
     if (!number) {
       if (this.broken.has(repository)) return Response.json({ message: "broken" }, { status: 500 });
       const state = searchParams.get("state");

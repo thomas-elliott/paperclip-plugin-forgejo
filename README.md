@@ -16,6 +16,7 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
 - Agents can merge pull requests only if you turn on **Let agents merge pull requests**, and approve
   them only if you turn on **Let agents approve pull requests**. Forgejo branch protection still
   applies.
+- When an agent opens a pull request, the plugin posts its link as a comment on the agent's task.
 - A Forgejo issue or pull-request link in a Paperclip issue or comment shows its title and live
   status, such as Open, Closed, Draft or Merged.
 - With **Import Forgejo issues** turned on, each project imports the open issues of the Forgejo
@@ -36,7 +37,7 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
   [Show the status of Forgejo links](#show-the-status-of-forgejo-links).
 - When a Forgejo link already shown elsewhere is added to another issue or comment, Paperclip shows
   its address instead of its title for up to five minutes, until its next refresh.
-- Pull requests that agents record on a task show as a plain title, not as Paperclip's GitHub
+- A pull request an agent opens shows on its task as a linked comment, not as Paperclip's GitHub
   pull-request card, which only recognises github.com.
 - Paperclip does not yet put plugin tools in an agent's tool list. Agents call the Forgejo tools
   through Paperclip's API instead, as the Forgejo tools skill tells them, so each agent that uses
@@ -174,6 +175,7 @@ it out. The plugin builds on these extension points instead:
 | Read project workspaces | `ctx.projects` | `projects.read`, `project.workspaces.read` |
 | Settings, dashboard and project tab | UI slots | `ui.*.register` |
 | Let agents open and review PRs, comment, read issues | `ctx.tools.register` | `agent.tools.register` |
+| Post an agent's new PR link on its task | `ctx.issues.createComment` | `issue.comments.create` |
 | Tell agents how to call those tools | managed skill, `ctx.skills.managed` | `skills.managed` |
 | React to Forgejo events | webhooks | `webhooks.receive` |
 | Show live status of pasted Forgejo PR and issue links | `objectReferences` | `external.objects.detect`, `external.objects.read` |
