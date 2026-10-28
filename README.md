@@ -9,13 +9,15 @@ Paperclip projects.
 - A dashboard widget shows whether Paperclip can reach Forgejo, the Forgejo version, and which user
   the token belongs to.
 - A Forgejo tab on each project lists your repositories and marks the ones the project already
-  uses. Pick a repository and the tab gives you the command that adds it as a workspace.
+  uses. Pick a repository and add it as a workspace with one button, or copy the command that adds it.
 - Your Forgejo access token is stored as a Paperclip secret, not in plain settings.
 
 ## Limitations
 
-- The plugin cannot add a workspace itself, because Paperclip does not let plugins create
-  workspaces. You copy the command from the Forgejo tab and run it.
+- Paperclip does not let plugins create workspaces. The Add (experimental) button works around this by
+  calling Paperclip's own API from the page, signed in as you. Paperclip does not promise to keep
+  that API the same, so an update could break the button. The command in the Forgejo tab is the
+  supported route and keeps working.
 - Paperclip's built-in GitHub features, such as its repository picker and pull-request review
   threads, only work with github.com. This plugin adds Forgejo beside them and cannot replace them.
 - Agents cannot yet open pull requests or read issues through the plugin.
@@ -53,9 +55,13 @@ plugin and install it again. Your settings are kept.
 ## Add a Forgejo repository to a project
 
 1. Open the project in Paperclip and go to the Forgejo tab.
-2. Choose a repository and select Copy command.
-3. Run the command in a terminal.
-4. Reload the tab. The repository now appears under the project's Forgejo workspaces.
+2. Choose a repository and select Add (experimental). The repository appears under the project's Forgejo
+   workspaces.
+
+If Add fails, the tab shows Paperclip's error. Use the command instead:
+
+1. Select Copy command and run the command in a terminal.
+2. Reload the tab.
 
 ## Technical details
 
