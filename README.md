@@ -1,8 +1,8 @@
 # Forgejo for Paperclip
 
 This plugin connects [Paperclip](https://paperclip.ing) to your own [Forgejo](https://forgejo.org)
-server. It checks the connection, lists your Forgejo repositories, and helps you add them to
-Paperclip projects.
+server. It adds Forgejo repositories to Paperclip projects, gives agents tools for Forgejo issues and
+pull requests, shows the live status of Forgejo links, and can import Forgejo issues into Paperclip.
 
 ## What it does
 
@@ -10,7 +10,18 @@ Paperclip projects.
   the token belongs to.
 - A Forgejo tab on each project lists your repositories and marks the ones the project already
   uses. Pick a repository and add it as a workspace with one button, or copy the command that adds it.
-- Your Forgejo access token is stored as a Paperclip secret, not in plain settings.
+- Agents get tools to search, read, create and update Forgejo issues, comment, open pull requests,
+  list a pull request's files and read its checks. Agents leave out the repository when their project
+  uses exactly one Forgejo repository.
+- Agents can merge pull requests only if you turn on **Let agents merge pull requests**. Forgejo
+  branch protection still applies.
+- A Forgejo issue or pull-request link in a Paperclip issue or comment shows its title and live
+  status, such as Open, Closed, Draft or Merged.
+- With **Import Forgejo issues** turned on, each project imports the open issues of the Forgejo
+  repositories it uses, every five minutes or straight away through a webhook. Titles and
+  descriptions follow Forgejo. Closing an issue on either side closes it on the other, and reopening
+  it in Forgejo reopens it in Paperclip. Comments are not copied.
+- Your Forgejo access token and webhook secret are stored as Paperclip secrets, not in plain settings.
 
 ## Limitations
 
@@ -20,19 +31,30 @@ Paperclip projects.
   supported route and keeps working.
 - Paperclip's built-in GitHub features, such as its repository picker and pull-request review
   threads, only work with github.com. This plugin adds Forgejo beside them and cannot replace them.
-- Agents cannot yet open pull requests or read issues through the plugin.
+- Link status is an experimental Paperclip feature, off by default for GitHub links too. See
+  [Show the status of Forgejo links](#show-the-status-of-forgejo-links).
+- Pull requests that agents record on a task show as a plain title, not as Paperclip's GitHub
+  pull-request card, which only recognises github.com.
+- Agents act in Forgejo as the user who owns the access token.
+- Reopening an imported issue in Paperclip does not reopen it in Forgejo.
 - For a private repository, the machine that runs your agents needs its own git credentials for
   Forgejo, such as an SSH key or a credential helper with an access token. Paperclip only supplies
   credentials for github.com. Without them the workspace is created but the clone fails.
 
 ## Install
 
+You need a Forgejo server, a Paperclip instance, and the right to install plugins in Paperclip.
+
 1. In Forgejo, go to Settings, Applications, and create an access token with these scopes:
 
    | Scope | Used for |
    | --- | --- |
    | `read:user` | Checking the connection |
-   | `read:repository` | Listing your repositories |
+   | `write:issue` | Reading, creating, commenting on and closing issues |
+   | `write:repository` | Listing repositories, and opening, reading and merging pull requests |
+
+   For read-only use, `read:issue` and `read:repository` are enough, but agents then cannot comment,
+   open pull requests or close imported issues.
 
 2. Install the plugin into Paperclip:
 
@@ -43,31 +65,65 @@ Paperclip projects.
 3. In Paperclip, open the Forgejo plugin's settings. Enter your Forgejo address, add the token as a
    secret, and save.
 4. Check the Forgejo widget on the dashboard. It should show your Forgejo version and user.
+5. Open a project in Paperclip and go to its Forgejo tab. Choose a repository and select Add
+   (experimental). The repository appears under the project's Forgejo workspaces.
+
+   If Add fails, the tab shows Paperclip's error. Select Copy command instead, run the command in a
+   terminal, and reload the tab.
+
+The plugin now works. Agents in that project can use the Forgejo tools.
 
 Forgejo cannot change an existing token's scopes. If a scope is missing, create a new token and
 update the secret in Paperclip.
 
-### Upgrading
+## Optional features
+
+These are all off until you turn them on. Save the plugin settings after changing them.
+
+### Import Forgejo issues
+
+Turn on **Import Forgejo issues**. Every five minutes, each project imports the open issues of the
+Forgejo repositories it uses.
+
+### Update imported issues straight away
+
+Without a webhook, imported issues update every five minutes. To update them straight away:
+
+1. Choose a long random secret and save it in the plugin settings as **Webhook secret**.
+2. In Forgejo, open the repository's or organisation's Settings, Webhooks, and add a Forgejo webhook:
+   - Target URL: `https://your-paperclip.example.com/api/plugins/paperclip-plugin-forgejo/webhooks/forgejo`
+   - HTTP method: POST, content type: `application/json`
+   - Secret: the same secret
+   - Trigger on: custom events, then **Issues**
+3. Use Test Delivery in Forgejo. Paperclip records each delivery. A delivery fails if the secret does
+   not match.
+
+### Let agents merge pull requests
+
+Turn on **Let agents merge pull requests**. Forgejo branch protection still applies.
+
+### Show the status of Forgejo links
+
+In Paperclip's instance settings, turn on the experimental **External objects** setting. Forgejo
+issue and pull-request links in Paperclip issues and comments then show their title and status.
+
+## Upgrade
 
 If a new version of the plugin needs more permissions, Paperclip refuses the upgrade. Uninstall the
-plugin and install it again. Your settings are kept.
+plugin and install it again; your settings are kept. Do not add `--force`, which deletes them.
 
-## Add a Forgejo repository to a project
+```bash
+npx paperclipai plugin uninstall paperclip-plugin-forgejo --api-base https://your-paperclip.example.com
+npx paperclipai plugin install @thomas-elliott/paperclip-plugin-forgejo --api-base https://your-paperclip.example.com
+```
 
-1. Open the project in Paperclip and go to the Forgejo tab.
-2. Choose a repository and select Add (experimental). The repository appears under the project's Forgejo
-   workspaces.
-
-If Add fails, the tab shows Paperclip's error. Use the command instead:
-
-1. Select Copy command and run the command in a terminal.
-2. Reload the tab.
+After upgrading, open the plugin settings and save them once. Until you do, the five-minute import
+and the webhook cannot find your company.
 
 ## Technical details
 
 Paperclip's GitHub support is built into its core server, not into a plugin, so a plugin cannot swap
-it out. The plugin builds on these extension points instead, and the later rows are candidates for
-future features:
+it out. The plugin builds on these extension points instead:
 
 | Need | Plugin feature | Capability |
 | --- | --- | --- |
@@ -78,7 +134,8 @@ future features:
 | Let agents open PRs, comment, read issues | `ctx.tools.register` | `agent.tools.register` |
 | React to Forgejo events | webhooks | `webhooks.receive` |
 | Show live status of pasted Forgejo PR and issue links | `objectReferences` | `external.objects.detect`, `external.objects.read` |
-| Sync Forgejo issues into Paperclip | `ctx.issues` | `issues.create`, `issues.update` |
+| Sync Forgejo issues into Paperclip | `ctx.issues`, a scheduled job, `issue.updated` events | `issues.read`, `issues.create`, `issues.update`, `jobs.schedule`, `events.subscribe` |
+| Remember sync state | `ctx.state` | `plugin.state.read`, `plugin.state.write` |
 
 The project tab recognises a workspace by any address Forgejo gives the repository: the HTTPS clone
 address, the SSH address or the web address.
