@@ -12,7 +12,7 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
   uses. Pick a repository and add it as a workspace with one button, or copy the command that adds it.
 - Agents get tools to search, read, create and update Forgejo issues, comment, open pull requests,
   list a pull request's files and read its checks. Agents leave out the repository when their project
-  uses exactly one Forgejo repository.
+  uses exactly one Forgejo repository. A **Forgejo tools** skill tells agents how to call the tools.
 - Agents can merge pull requests only if you turn on **Let agents merge pull requests**. Forgejo
   branch protection still applies.
 - A Forgejo issue or pull-request link in a Paperclip issue or comment shows its title and live
@@ -35,6 +35,9 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
   [Show the status of Forgejo links](#show-the-status-of-forgejo-links).
 - Pull requests that agents record on a task show as a plain title, not as Paperclip's GitHub
   pull-request card, which only recognises github.com.
+- Paperclip does not yet put plugin tools in an agent's tool list. Agents call the Forgejo tools
+  through Paperclip's API instead, as the Forgejo tools skill tells them, so each agent that uses
+  Forgejo needs that skill. The tools only work on a task that belongs to a project.
 - Agents act in Forgejo as the user who owns the access token.
 - Reopening an imported issue in Paperclip does not reopen it in Forgejo.
 - For a private repository, the machine that runs your agents needs its own git credentials for
@@ -70,8 +73,13 @@ You need a Forgejo server, a Paperclip instance, and the right to install plugin
 
    If Add fails, the tab shows Paperclip's error. Select Copy command instead, run the command in a
    terminal, and reload the tab.
+6. For each agent that should use Forgejo, open the agent's skills and turn on **Forgejo tools**.
+   Saving the plugin settings added this skill to your company's skills.
 
-The plugin now works. Agents in that project can use the Forgejo tools.
+The plugin now works. Agents with the skill can use the Forgejo tools in that project.
+
+The plugin keeps the skill in step with its tools. If you edit the skill, the plugin replaces your
+edits the next time you save its settings.
 
 Forgejo cannot change an existing token's scopes. If a scope is missing, create a new token and
 update the secret in Paperclip.
@@ -132,6 +140,7 @@ it out. The plugin builds on these extension points instead:
 | Read project workspaces | `ctx.projects` | `projects.read`, `project.workspaces.read` |
 | Settings, dashboard and project tab | UI slots | `ui.*.register` |
 | Let agents open PRs, comment, read issues | `ctx.tools.register` | `agent.tools.register` |
+| Tell agents how to call those tools | managed skill, `ctx.skills.managed` | `skills.managed` |
 | React to Forgejo events | webhooks | `webhooks.receive` |
 | Show live status of pasted Forgejo PR and issue links | `objectReferences` | `external.objects.detect`, `external.objects.read` |
 | Sync Forgejo issues into Paperclip | `ctx.issues`, a scheduled job, `issue.updated` events | `issues.read`, `issues.create`, `issues.update`, `jobs.schedule`, `events.subscribe` |
