@@ -11,10 +11,11 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
 - A Forgejo tab on each project lists your repositories and marks the ones the project already
   uses. Pick a repository and add it as a workspace with one button, or copy the command that adds it.
 - Agents get tools to search, read, create and update Forgejo issues, comment, open pull requests,
-  list a pull request's files and read its checks. Agents leave out the repository when their project
+  read a pull request's files, diff and checks, and review pull requests and read their reviews. Agents leave out the repository when their project
   uses exactly one Forgejo repository. A **Forgejo tools** skill tells agents how to call the tools.
-- Agents can merge pull requests only if you turn on **Let agents merge pull requests**. Forgejo
-  branch protection still applies.
+- Agents can merge pull requests only if you turn on **Let agents merge pull requests**, and approve
+  them only if you turn on **Let agents approve pull requests**. Forgejo branch protection still
+  applies.
 - A Forgejo issue or pull-request link in a Paperclip issue or comment shows its title and live
   status, such as Open, Closed, Draft or Merged.
 - With **Import Forgejo issues** turned on, each project imports the open issues of the Forgejo
@@ -41,7 +42,10 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
   through Paperclip's API instead, as the Forgejo tools skill tells them, so each agent that uses
   Forgejo needs that skill. The tools only work on a task that belongs to a project.
 - A failed tool call still returns HTTP 200 from Paperclip's API, with the reason in `result.error`.
-- Agents act in Forgejo as the user who owns the access token.
+- Agents act in Forgejo as the user who owns the access token. Forgejo does not let that user
+  approve or request changes on pull requests it opened, so one agent cannot approve another
+  agent's pull request unless you set a reviewer access token. See
+  [Let agents approve pull requests](#let-agents-approve-pull-requests).
 - Reopening an imported issue in Paperclip does not reopen it in Forgejo.
 - When a webhook delivery's secret does not match, Paperclip answers Forgejo with HTTP 502, so
   Forgejo shows a server error rather than an authentication error. Paperclip records the delivery
@@ -62,7 +66,7 @@ You need a Forgejo server, a Paperclip instance, and the right to install plugin
    | --- | --- |
    | `read:user` | Checking the connection |
    | `write:issue` | Reading, creating, commenting on and closing issues |
-   | `write:repository` | Listing repositories, and opening, reading and merging pull requests |
+   | `write:repository` | Listing repositories, and opening, reading, reviewing and merging pull requests |
 
    For read-only use, `read:issue` and `read:repository` are enough, but agents then cannot comment,
    open pull requests or close imported issues.
@@ -118,6 +122,28 @@ Without a webhook, imported issues update every five minutes. To update them str
 
 Turn on **Let agents merge pull requests**. Forgejo branch protection still applies.
 
+### Let agents approve pull requests
+
+Turn on **Let agents approve pull requests**. Agents can always comment on a pull request or request
+changes; this setting only adds approving. Forgejo branch protection decides whether an approval
+counts towards merging.
+
+Forgejo does not let the account that opened a pull request approve it or request changes on it.
+Agents open pull requests with the access token's account, so for agents to review each other's
+pull requests, give reviews a second account:
+
+1. Create a second Forgejo user for reviews, and give it at least read access to the repositories.
+2. For its approvals to count, either add it to the approvals list of the branch protection rule
+   for the target branch, or, if there is no rule, give it write access.
+3. Signed in as that user, create an access token with the `write:repository` scope.
+4. Save the token in the plugin settings as **Reviewer access token**.
+
+`list_reviews` shows `official: true` on reviews that count. Forgejo decides this when the review is
+posted, so changing access later does not change earlier reviews.
+
+Agents then post every review as that user. They still open, comment on and merge pull requests as
+the main account.
+
 ### Show the status of Forgejo links
 
 In Paperclip's instance settings, turn on the experimental **External objects** setting. Forgejo
@@ -147,7 +173,7 @@ it out. The plugin builds on these extension points instead:
 | Keep the access token out of config | `format: "secret-ref"` field, `ctx.secrets.resolve` | `secrets.read-ref` |
 | Read project workspaces | `ctx.projects` | `projects.read`, `project.workspaces.read` |
 | Settings, dashboard and project tab | UI slots | `ui.*.register` |
-| Let agents open PRs, comment, read issues | `ctx.tools.register` | `agent.tools.register` |
+| Let agents open and review PRs, comment, read issues | `ctx.tools.register` | `agent.tools.register` |
 | Tell agents how to call those tools | managed skill, `ctx.skills.managed` | `skills.managed` |
 | React to Forgejo events | webhooks | `webhooks.receive` |
 | Show live status of pasted Forgejo PR and issue links | `objectReferences` | `external.objects.detect`, `external.objects.read` |

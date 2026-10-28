@@ -270,6 +270,170 @@ describe("agent tools", () => {
   });
 });
 
+describe("pull request reviews", () => {
+  const diff = [
+    "diff --git a/src/app.ts b/src/app.ts",
+    "--- a/src/app.ts",
+    "+++ b/src/app.ts",
+    "@@ -1,2 +1,2 @@",
+    "-const a = 1;",
+    "+const a = 2;",
+    " export default a;",
+    "diff --git a/README.md b/README.md",
+    "--- a/README.md",
+    "+++ b/README.md",
+    "@@ -1 +1 @@",
+    "-Old",
+    "+New",
+    "",
+  ].join("\n");
+
+  function pullRequest() {
+    const forgejo = new FakeForgejo(["me/app"]);
+    forgejo.addIssue("me/app", { number: 7, isPull: true });
+    forgejo.pullDiffs.set("me/app#7", diff);
+    forgejo.pullFiles.set("me/app#7", ["src/app.ts", "README.md"]);
+    return forgejo;
+  }
+
+  it("reads a pull request's diff, whole or for one file, with the commit it shows", async () => {
+    pullRequest();
+    const harness = await setUp(config, ["me/app"]);
+
+    const whole = await harness.executeTool<ToolResult>("get_pull_request_diff", { number: 7 }, runCtx);
+    const oneFile = await harness.executeTool<ToolResult>("get_pull_request_diff", { number: 7, path: "README.md" }, runCtx);
+    const missing = await harness.executeTool<ToolResult>("get_pull_request_diff", { number: 7, path: "nope.ts" }, runCtx);
+
+    expect(whole.data).toEqual({ commit: "abc123", diff });
+    expect(oneFile.data).toEqual({ commit: "abc123", diff: "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-Old\n+New\n" });
+    expect(missing.error).toBe("Pull request 7 does not change nope.ts. It changes: src/app.ts, README.md.");
+  });
+
+  it("posts a review with comments on changed and removed lines", async () => {
+    const forgejo = pullRequest();
+    const harness = await setUp(config, ["me/app"]);
+
+    const result = await harness.executeTool<ToolResult>(
+      "review_pull_request",
+      {
+        number: 7,
+        event: "request_changes",
+        commit: "abc123",
+        body: "Two problems.",
+        comments: [
+          { path: "src/app.ts", line: 1, body: "Why 2?" },
+          { path: "src/app.ts", line: 1, side: "old", body: "1 was right." },
+        ],
+      },
+      runCtx,
+    );
+
+    expect(result.data).toMatchObject({ state: "REQUEST_CHANGES", commit: "abc123" });
+    expect(forgejo.requests.find((request) => request.method === "POST")?.body).toEqual({
+      event: "REQUEST_CHANGES",
+      body: "Two problems.",
+      commit_id: "abc123",
+      comments: [
+        { path: "src/app.ts", body: "Why 2?", new_position: 1, old_position: 0 },
+        { path: "src/app.ts", body: "1 was right.", new_position: 0, old_position: 1 },
+      ],
+    });
+  });
+
+  it("refuses a review of a commit that is no longer the pull request's latest", async () => {
+    const forgejo = pullRequest();
+    const harness = await setUp(config, ["me/app"]);
+
+    const result = await harness.executeTool<ToolResult>("review_pull_request", { number: 7, event: "comment", commit: "old456", body: "Fine." }, runCtx);
+
+    expect(result.error).toContain("its latest commit is abc123");
+    expect(forgejo.requests.filter((request) => request.method === "POST")).toEqual([]);
+  });
+
+  it("sends Forgejo only events that publish the review, and checks line comments", async () => {
+    const forgejo = pullRequest();
+    const harness = await setUp(config, ["me/app"]);
+
+    // Forgejo would save a review with any other event as a draft that no one else can see.
+    const draft = await harness.executeTool<ToolResult>("review_pull_request", { number: 7, event: "PENDING", commit: "abc123" }, runCtx);
+    const badLine = await harness.executeTool<ToolResult>(
+      "review_pull_request",
+      { number: 7, event: "comment", commit: "abc123", comments: [{ path: "src/app.ts", line: "1", body: "Hm" }] },
+      runCtx,
+    );
+
+    expect(draft.error).toBe("event must be one of comment, request_changes, approve.");
+    expect(badLine.error).toContain("comments must be a list");
+    expect(forgejo.requests).toEqual([]);
+  });
+
+  it("refuses comments on lines the diff does not show, which Forgejo would accept but not place", async () => {
+    const forgejo = pullRequest();
+    const harness = await setUp(config, ["me/app"]);
+
+    const result = await harness.executeTool<ToolResult>(
+      "review_pull_request",
+      {
+        number: 7,
+        event: "comment",
+        commit: "abc123",
+        comments: [
+          { path: "src/app.ts", line: 2, side: "old", body: "Unchanged line, shown in the diff." },
+          { path: "README.md", line: 1, body: "Added line." },
+          { path: "src/app.ts", line: 3, body: "Past the end of the diff." },
+          { path: "other.ts", line: 1, body: "Not in the pull request." },
+        ],
+      },
+      runCtx,
+    );
+
+    expect(result.error).toContain("lines the diff does not show: src/app.ts line 3 (new), other.ts line 1 (new).");
+    expect(forgejo.requests.filter((request) => request.method === "POST")).toEqual([]);
+  });
+
+  it("approves only when approving is allowed, and through the reviewer account when one is set", async () => {
+    const forgejo = pullRequest();
+    const approve = { number: 7, event: "approve", commit: "abc123" };
+
+    const refused = await (await setUp(config, ["me/app"])).executeTool<ToolResult>("review_pull_request", approve, runCtx);
+    expect(refused.error).toContain("Approving is turned off");
+
+    // The plugin's own account opened the pull request, so Forgejo refuses its approval.
+    const ownPull = await (await setUp({ ...config, allowApprove: true }, ["me/app"])).executeTool<ToolResult>("review_pull_request", approve, runCtx);
+    expect(ownPull.error).toContain("An operator can set a reviewer access token");
+
+    const approved = await (await setUp({ ...config, allowApprove: true, reviewToken: "review-ref" }, ["me/app"])).executeTool<ToolResult>(
+      "review_pull_request",
+      approve,
+      runCtx,
+    );
+    expect(approved.data).toMatchObject({ state: "APPROVED" });
+    expect(forgejo.requests.at(-1)?.token).toBe("resolved:review-ref");
+  });
+
+  it("lists reviews with their comments on lines", async () => {
+    pullRequest();
+    const harness = await setUp(config, ["me/app"]);
+    await harness.executeTool<ToolResult>(
+      "review_pull_request",
+      { number: 7, event: "comment", commit: "abc123", body: "Looks fine.", comments: [{ path: "README.md", line: 1, side: "old", body: "Keep this?" }] },
+      runCtx,
+    );
+
+    const result = await harness.executeTool<ToolResult>("list_reviews", { number: 7 }, runCtx);
+
+    expect(result.data).toEqual([
+      expect.objectContaining({
+        author: "someone",
+        state: "COMMENT",
+        body: "Looks fine.",
+        commit: "abc123",
+        comments: [{ path: "README.md", line: 1, side: "old", author: "someone", body: "Keep this?", resolved: false }],
+      }),
+    ]);
+  });
+});
+
 describe("issue sync", () => {
   async function paperclipIssues(harness: Awaited<ReturnType<typeof setUp>>) {
     return harness.ctx.issues.list({ companyId: "co-1", projectId: "project-1" });

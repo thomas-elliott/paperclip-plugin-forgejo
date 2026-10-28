@@ -108,6 +108,59 @@ const tools: PluginToolDeclaration[] = [
     parametersSchema: { type: "object", required: ["number"], properties: { repository, number } },
   },
   {
+    name: "get_pull_request_diff",
+    displayName: "Read a Forgejo pull request's diff",
+    description:
+      "Reads a pull request's changes as a unified diff, whole or for one file, and the commit it shows. Pass that commit to review_pull_request.",
+    parametersSchema: {
+      type: "object",
+      required: ["number"],
+      properties: { repository, number, path: { type: "string", description: "One changed file's path, to read only its part of the diff." } },
+    },
+  },
+  {
+    name: "review_pull_request",
+    displayName: "Review a Forgejo pull request",
+    description:
+      "Posts a review of a pull request: a comment, a request for changes, or an approval, with optional comments on lines. Approving fails unless the operator has let agents approve in the plugin settings.",
+    parametersSchema: {
+      type: "object",
+      required: ["number", "event", "commit"],
+      properties: {
+        repository,
+        number,
+        event: { type: "string", enum: ["comment", "request_changes", "approve"] },
+        commit: { type: "string", description: "The commit you reviewed, as returned by get_pull_request_diff. Refused if the pull request has changed since." },
+        body: { type: "string", description: "Review summary in Markdown. Required to request changes." },
+        comments: {
+          type: "array",
+          description: "Comments on lines of the diff.",
+          items: {
+            type: "object",
+            required: ["path", "line", "body"],
+            properties: {
+              path: { type: "string", description: "File path as shown in the diff." },
+              line: { type: "integer", minimum: 1, description: "Line number in the file." },
+              side: {
+                type: "string",
+                enum: ["new", "old"],
+                default: "new",
+                description: "new for a line in the changed file, old for a removed line, numbered in the file before the change.",
+              },
+              body: { type: "string", description: "Comment text in Markdown." },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "list_reviews",
+    displayName: "List Forgejo pull request reviews",
+    description: "Lists the reviews of a pull request, oldest first, each with its state, summary, comments on lines, and whether it counts under branch protection (official).",
+    parametersSchema: { type: "object", required: ["number"], properties: { repository, number } },
+  },
+  {
     name: "get_pull_request_checks",
     displayName: "Read Forgejo pull request checks",
     description: "Reads the combined CI status of a pull request's latest commit, and each check's result.",
@@ -184,6 +237,19 @@ const manifest: PaperclipPluginManifestV1 = {
         default: false,
         title: "Let agents merge pull requests",
         description: "Forgejo branch protection still applies",
+      },
+      allowApprove: {
+        type: "boolean",
+        default: false,
+        title: "Let agents approve pull requests",
+        description: "Agents can always comment on a pull request or request changes. Forgejo branch protection decides whether an approval counts.",
+      },
+      reviewToken: {
+        type: "object",
+        format: "secret-ref",
+        title: "Reviewer access token",
+        description:
+          "Optional. A second Forgejo account's token, used only to post reviews. Forgejo does not let the account that opened a pull request approve it or request changes, so without this agents cannot do that on pull requests other agents opened.",
       },
       webhookSecret: {
         type: "object",

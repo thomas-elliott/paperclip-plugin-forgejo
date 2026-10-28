@@ -3,8 +3,10 @@ import manifest from "./manifest.js";
 import {
   connect,
   errorMessage,
+  ForgejoError,
   forgejoJson,
   forgejoPages,
+  forgejoText,
   isRepositoryName,
   NOT_CONFIGURED,
   projectRepositoryNames,
@@ -26,7 +28,71 @@ type Input = {
   head?: string;
   base?: string;
   method?: "merge" | "rebase" | "squash";
+  path?: string;
+  event?: string;
+  commit?: string;
+  // Checked in review_pull_request, since Paperclip does not check inputs against the schema.
+  comments?: unknown;
 };
+
+type LineComment = { path: string; line: number; side?: "new" | "old"; body: string };
+
+// Forgejo saves a review with any other event as a draft that only its author can see, so the tool
+// sends only these.
+const REVIEW_EVENTS: Record<string, string> = { comment: "COMMENT", request_changes: "REQUEST_CHANGES", approve: "APPROVED" };
+
+function isLineComment(value: unknown): value is LineComment {
+  const comment = value as Partial<LineComment> | null;
+  return (
+    typeof comment?.path === "string" &&
+    comment.path !== "" &&
+    Number.isInteger(comment.line) &&
+    comment.line! > 0 &&
+    (comment.side === undefined || comment.side === "new" || comment.side === "old") &&
+    typeof comment.body === "string" &&
+    comment.body !== ""
+  );
+}
+
+// One file's part of a unified diff. Each part starts at its "diff --git a/<old> b/<new>" line.
+function diffOfFile(diff: string, path: string): string | null {
+  const parts = diff.split(/^(?=diff --git )/m);
+  return (
+    parts.find((text) => {
+      const header = text.slice(0, text.indexOf("\n"));
+      return header.startsWith(`diff --git a/${path} b/`) || header.endsWith(` b/${path}`);
+    }) ?? null
+  );
+}
+
+// Whether a file's diff shows a line: on the "new" side an added or unchanged line, on the "old" side
+// a removed or unchanged line. Forgejo accepts comments on other lines but cannot place them in the diff.
+function lineInDiff(fileDiff: string, line: number, side: "new" | "old"): boolean {
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+  for (const text of fileDiff.split("\n")) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      inHunk = true;
+    } else if (!inHunk) {
+      // The file's header, whose "--- a/path" line would otherwise read as a removed line.
+    } else if (text.startsWith(" ")) {
+      if ((side === "old" ? oldLine : newLine) === line) return true;
+      oldLine += 1;
+      newLine += 1;
+    } else if (text.startsWith("-")) {
+      if (side === "old" && oldLine === line) return true;
+      oldLine += 1;
+    } else if (text.startsWith("+")) {
+      if (side === "new" && newLine === line) return true;
+      newLine += 1;
+    }
+  }
+  return false;
+}
 
 type Tool = (call: { ctx: PluginContext; forgejo: Forgejo; repository: () => Promise<string>; input: Input }) => Promise<unknown>;
 
@@ -143,6 +209,127 @@ const tools: Record<string, Tool> = {
     type File = { filename: string; status: string; additions: number; deletions: number };
     const files = await forgejoPages<File>(ctx, forgejo, `/repos/${await repository()}/pulls/${input.number}/files`);
     return files.map(({ filename, status, additions, deletions }) => ({ filename, status, additions, deletions }));
+  },
+
+  async get_pull_request_diff({ ctx, forgejo, repository, input }) {
+    const name = await repository();
+    const pull = await forgejoJson<ForgejoPullRequestJson>(ctx, forgejo, `/repos/${name}/pulls/${input.number}`);
+    const diff = await forgejoText(ctx, forgejo, `/repos/${name}/pulls/${input.number}.diff`);
+    if (!input.path) return { commit: pull.head.sha, diff };
+    const fileDiff = diffOfFile(diff, input.path);
+    if (fileDiff === null) {
+      const files = await forgejoPages<{ filename: string }>(ctx, forgejo, `/repos/${name}/pulls/${input.number}/files`);
+      throw new Error(`Pull request ${input.number} does not change ${input.path}. It changes: ${files.map((file) => file.filename).join(", ")}.`);
+    }
+    return { commit: pull.head.sha, diff: fileDiff };
+  },
+
+  async review_pull_request({ ctx, forgejo, repository, input }) {
+    const event = REVIEW_EVENTS[input.event ?? ""];
+    if (!event) throw new Error(`event must be one of ${Object.keys(REVIEW_EVENTS).join(", ")}.`);
+    if (input.event === "approve" && !forgejo.allowApprove) {
+      throw new Error("Approving is turned off. An operator can allow it in the Forgejo plugin settings; until then, comment or request changes.");
+    }
+    const given = input.comments ?? [];
+    if (!Array.isArray(given) || !given.every(isLineComment)) {
+      throw new Error("comments must be a list of { path, line, side, body }, with line a whole number above zero and side new or old.");
+    }
+    const comments = given.map((comment) => ({ ...comment, side: comment.side ?? "new" }));
+
+    const name = await repository();
+    const pull = await forgejoJson<ForgejoPullRequestJson>(ctx, forgejo, `/repos/${name}/pulls/${input.number}`);
+    if (pull.head.sha !== input.commit) {
+      throw new Error(`Pull request ${input.number} has changed since ${input.commit}: its latest commit is ${pull.head.sha}. Read the diff again and review that.`);
+    }
+    if (comments.length > 0) {
+      const diff = await forgejoText(ctx, forgejo, `/repos/${name}/pulls/${input.number}.diff`);
+      const outside = comments.filter((comment) => {
+        const fileDiff = diffOfFile(diff, comment.path);
+        return fileDiff === null || !lineInDiff(fileDiff, comment.line, comment.side);
+      });
+      if (outside.length > 0) {
+        const lines = outside.map((comment) => `${comment.path} line ${comment.line} (${comment.side})`).join(", ");
+        throw new Error(`These comments are on lines the diff does not show: ${lines}. Comment only on lines in the diff, or put the remark in the review body.`);
+      }
+    }
+
+    type Review = { id: number; state: string; html_url: string; commit_id: string };
+    try {
+      const review = await forgejoJson<Review>(ctx, forgejo, `/repos/${name}/pulls/${input.number}/reviews`, {
+        method: "POST",
+        token: forgejo.reviewToken ?? undefined,
+        body: {
+          event,
+          body: input.body ?? "",
+          commit_id: input.commit,
+          // Forgejo takes a line in the changed file as new_position, and a removed line as old_position.
+          comments: comments.map((comment) => ({
+            path: comment.path,
+            body: comment.body,
+            new_position: comment.side === "old" ? 0 : comment.line,
+            old_position: comment.side === "old" ? comment.line : 0,
+          })),
+        },
+      });
+      return { id: review.id, state: review.state, url: review.html_url, commit: review.commit_id };
+    } catch (error) {
+      // Forgejo's words are "approve your own pull is not allowed" and "reject your own pull is not allowed".
+      if (error instanceof ForgejoError && error.status === 422 && error.message.includes("your own pull")) {
+        const fix = forgejo.reviewToken
+          ? "The reviewer account set in the plugin settings opened this pull request."
+          : "An operator can set a reviewer access token in the Forgejo plugin settings, so reviews come from another account.";
+        throw new Error(`${error.message}. Forgejo does not let the account that opened a pull request approve it or request changes. ${fix} Until then, post a comment review.`);
+      }
+      throw error;
+    }
+  },
+
+  async list_reviews({ ctx, forgejo, repository, input }) {
+    type Review = {
+      id: number;
+      user: { login: string } | null;
+      state: string;
+      body: string;
+      commit_id: string;
+      stale: boolean;
+      dismissed: boolean;
+      official: boolean;
+      comments_count: number;
+      submitted_at: string;
+    };
+    // Forgejo gives a line in the changed file as position, and a removed line as original_position.
+    type Comment = { path: string; position: number; original_position: number; body: string; user: { login: string }; resolver: unknown };
+    const name = await repository();
+    const reviews = await forgejoPages<Review>(ctx, forgejo, `/repos/${name}/pulls/${input.number}/reviews`);
+    return Promise.all(
+      reviews.map(async (review) => {
+        const comments =
+          review.comments_count > 0
+            ? await forgejoJson<Comment[]>(ctx, forgejo, `/repos/${name}/pulls/${input.number}/reviews/${review.id}/comments`)
+            : [];
+        return {
+          id: review.id,
+          // A review requested from a team has no user.
+          author: review.user?.login ?? null,
+          state: review.state,
+          body: review.body,
+          commit: review.commit_id,
+          stale: review.stale,
+          dismissed: review.dismissed,
+          // Whether the review counts under branch protection, such as towards required approvals.
+          official: review.official,
+          submittedAt: review.submitted_at,
+          comments: comments.map((comment) => ({
+            path: comment.path,
+            line: comment.position || comment.original_position,
+            side: comment.position ? "new" : "old",
+            author: comment.user.login,
+            body: comment.body,
+            resolved: Boolean(comment.resolver),
+          })),
+        };
+      }),
+    );
   },
 
   async get_pull_request_checks({ ctx, forgejo, repository, input }) {
