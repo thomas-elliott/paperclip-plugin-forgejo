@@ -1,4 +1,8 @@
-import { definePlugin, runWorker, type EnvSecretRefBinding, type PluginContext } from "@paperclipai/plugin-sdk";
+import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
+import { registerAgentTools } from "./agent-tools.js";
+import { addressKey, connect, errorMessage, listRepositories, NOT_CONFIGURED, rememberConfiguredCompany, repositoriesUsedBy, repositoryAddressKeys, request } from "./forgejo.js";
+import { handleWebhook, onPaperclipIssueUpdated, syncAllCompanies } from "./issue-sync.js";
+import { detectObjects, resolveObject } from "./link-status.js";
 
 export type ConnectionStatus =
   | { connected: true; forgejoVersion: string; username: string }
@@ -16,38 +20,6 @@ export type ProjectRepositories =
       repositories: ForgejoRepository[];
     };
 
-type ForgejoRepositoryJson = { full_name: string; clone_url: string; ssh_url: string; html_url: string; private: boolean };
-
-const NOT_CONFIGURED = "Set the Forgejo URL and access token in the plugin settings.";
-
-// Forgejo may return fewer items than this per page (its MAX_RESPONSE_ITEMS setting), so paging stops on an empty page.
-const PAGE_SIZE = 50;
-
-type Forgejo = { baseUrl: string; apiUrl: string; token: string };
-
-async function connect(ctx: PluginContext, companyId: string): Promise<Forgejo | null> {
-  const config = await ctx.config.get(companyId);
-  if (typeof config.baseUrl !== "string" || !config.baseUrl || !config.token) return null;
-
-  const baseUrl = config.baseUrl.replace(/\/+$/, "");
-  // Resolve the token on every call: Paperclip forbids caching secret values.
-  const token = await ctx.secrets.resolve(config.token as EnvSecretRefBinding, { companyId, configPath: "token" });
-  return { baseUrl, apiUrl: `${baseUrl}/api/v1`, token };
-}
-
-// ctx.http.fetch throws, rather than returning a status, for bad addresses, DNS failures, timeouts and
-// blocked private addresses. Turn those into a message the user can act on.
-async function request(ctx: PluginContext, forgejo: Forgejo, path: string, options: { withToken: boolean }) {
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (options.withToken) headers.Authorization = `token ${forgejo.token}`;
-  try {
-    return await ctx.http.fetch(`${forgejo.apiUrl}${path}`, { headers });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Could not reach Forgejo at ${forgejo.baseUrl}: ${detail}`);
-  }
-}
-
 async function checkConnection(ctx: PluginContext, companyId: string): Promise<ConnectionStatus> {
   const forgejo = await connect(ctx, companyId);
   if (!forgejo) return { connected: false, reason: NOT_CONFIGURED };
@@ -57,7 +29,7 @@ async function checkConnection(ctx: PluginContext, companyId: string): Promise<C
     // which would make a bad token look like an unreachable server.
     const [versionResponse, userResponse] = await Promise.all([
       request(ctx, forgejo, "/version", { withToken: false }),
-      request(ctx, forgejo, "/user", { withToken: true }),
+      request(ctx, forgejo, "/user"),
     ]);
     if (!versionResponse.ok) {
       return { connected: false, reason: `Forgejo did not respond at ${forgejo.apiUrl} (HTTP ${versionResponse.status}).` };
@@ -69,32 +41,8 @@ async function checkConnection(ctx: PluginContext, companyId: string): Promise<C
     const { login } = (await userResponse.json()) as { login: string };
     return { connected: true, forgejoVersion: version, username: login };
   } catch (error) {
-    return { connected: false, reason: error instanceof Error ? error.message : String(error) };
+    return { connected: false, reason: errorMessage(error) };
   }
-}
-
-async function listRepositories(ctx: PluginContext, forgejo: Forgejo): Promise<ForgejoRepositoryJson[]> {
-  const repositories: ForgejoRepositoryJson[] = [];
-  for (let page = 1; ; page += 1) {
-    const response = await request(ctx, forgejo, `/user/repos?limit=${PAGE_SIZE}&page=${page}`, { withToken: true });
-    if (!response.ok) throw new Error(`Forgejo could not list repositories (HTTP ${response.status}).`);
-
-    const batch = (await response.json()) as ForgejoRepositoryJson[];
-    if (batch.length === 0) return repositories;
-    repositories.push(...batch);
-  }
-}
-
-// Reduces the forms one repository address can take to one key, so a workspace matches whichever
-// address it was created with: trailing ".git" or "/", letter case, and scp-style SSH ("git@host:owner/repo").
-function addressKey(address: string): string {
-  const scpStyle = /^([^@/\s]+@[^:/\s]+):(.+)$/.exec(address.trim());
-  const url = scpStyle ? `ssh://${scpStyle[1]}/${scpStyle[2]}` : address.trim();
-  return url.replace(/\/+$/, "").replace(/\.git$/, "").toLowerCase();
-}
-
-function repositoryAddressKeys(repository: ForgejoRepositoryJson): string[] {
-  return [repository.clone_url, repository.ssh_url, repository.html_url].map(addressKey);
 }
 
 async function getProjectRepositories(ctx: PluginContext, companyId: string, projectId: string): Promise<ProjectRepositories> {
@@ -106,7 +54,7 @@ async function getProjectRepositories(ctx: PluginContext, companyId: string, pro
     listRepositories(ctx, forgejo),
   ]);
 
-  const workspaceKeys = new Set(workspaces.flatMap((workspace) => (workspace.repoUrl ? [addressKey(workspace.repoUrl)] : [])));
+  const used = new Set(repositoriesUsedBy(workspaces, repositories));
   const repositoryKeys = new Set(repositories.flatMap(repositoryAddressKeys));
 
   return {
@@ -118,9 +66,16 @@ async function getProjectRepositories(ctx: PluginContext, companyId: string, pro
       fullName: repository.full_name,
       cloneUrl: repository.clone_url,
       private: repository.private,
-      linked: repositoryAddressKeys(repository).some((key) => workspaceKeys.has(key)),
+      linked: used.has(repository),
     })),
   };
+}
+
+let pluginContext: PluginContext | null = null;
+
+function requireContext(): PluginContext {
+  if (!pluginContext) throw new Error("The Forgejo plugin worker has not finished starting.");
+  return pluginContext;
 }
 
 const plugin = definePlugin({
@@ -134,6 +89,30 @@ const plugin = definePlugin({
     ctx.data.register("projectRepositories", async (params) => {
       return getProjectRepositories(ctx, String(params.companyId ?? ""), String(params.projectId ?? ""));
     });
+
+    registerAgentTools(ctx);
+    ctx.jobs.register("sync-issues", () => syncAllCompanies(ctx));
+    ctx.events.on("issue.updated", (event) => onPaperclipIssueUpdated(ctx, event));
+    pluginContext = ctx;
+  },
+
+  // Paperclip calls these without a context, so they use the one setup received.
+  // Implementing onConfigChanged also stops Paperclip restarting the worker on every settings save;
+  // the plugin reads its settings on every call, so it needs no restart.
+  async onConfigChanged(_config, context) {
+    if (context?.companyId) await rememberConfiguredCompany(requireContext(), context.companyId);
+  },
+
+  async onWebhook(input) {
+    await handleWebhook(requireContext(), input);
+  },
+
+  async onDetectExternalObjects(params) {
+    return detectObjects(requireContext(), params);
+  },
+
+  async onResolveExternalObject(params) {
+    return resolveObject(requireContext(), params);
   },
 
   async onHealth() {
