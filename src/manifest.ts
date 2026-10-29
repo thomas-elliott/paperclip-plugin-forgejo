@@ -271,6 +271,13 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Let agents approve pull requests",
         description: "Agents can always comment on a pull request or request changes. Forgejo branch protection decides whether an approval counts.",
       },
+      privateNetwork: {
+        type: "boolean",
+        default: false,
+        title: "Forgejo is on a private network",
+        description:
+          "Turn on if Paperclip reaches Forgejo at a private address, such as 192.168.x.x or 10.x.x.x. Paperclip blocks plugins from private addresses unless this is on.",
+      },
       reviewToken: {
         type: "object",
         format: "secret-ref",

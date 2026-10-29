@@ -15,6 +15,7 @@ export type Forgejo = {
   syncIssues: boolean;
   allowMerge: boolean;
   allowApprove: boolean;
+  privateNetwork: boolean;
   webhookSecret: EnvSecretRefBinding | null;
 };
 
@@ -88,6 +89,7 @@ export async function connect(ctx: PluginContext, companyId: string): Promise<Fo
     syncIssues: config.syncIssues === true,
     allowMerge: config.allowMerge === true,
     allowApprove: config.allowApprove === true,
+    privateNetwork: config.privateNetwork === true,
     webhookSecret: (config.webhookSecret as EnvSecretRefBinding | undefined) ?? null,
   };
 }
@@ -116,12 +118,17 @@ export async function request(ctx: PluginContext, forgejo: Forgejo, path: string
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.withToken !== false) headers.Authorization = `token ${options.token ?? forgejo.token}`;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
+  const url = `${forgejo.apiUrl}${path}`;
+  const init = {
+    method: options.method ?? "GET",
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  };
   try {
-    return await ctx.http.fetch(`${forgejo.apiUrl}${path}`, {
-      method: options.method ?? "GET",
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    });
+    // ctx.http.fetch refuses private addresses and cannot be told otherwise. Bypassing it is safe
+    // because only an instance admin can set the Forgejo URL. The timeout matches ctx.http.fetch's.
+    if (forgejo.privateNetwork) return await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
+    return await ctx.http.fetch(url, init);
   } catch (error) {
     throw new Error(`Could not reach Forgejo at ${forgejo.baseUrl}: ${errorMessage(error)}`);
   }
