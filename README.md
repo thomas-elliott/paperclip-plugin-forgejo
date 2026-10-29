@@ -196,8 +196,9 @@ issue and pull-request links in Paperclip issues and comments then show their ti
 
 ## Upgrade
 
-If a new version of the plugin needs more permissions, Paperclip refuses the upgrade. Uninstall the
-plugin and install it again; your settings are kept. Do not add `--force`, which deletes them.
+The Paperclip CLI has no upgrade command, and installing over an installed plugin fails with
+"Plugin already installed". To upgrade, uninstall the plugin and install it again. Your settings
+are kept. Do not add `--force`, which deletes them.
 
 ```bash
 npx paperclipai plugin uninstall paperclip-plugin-forgejo --api-base https://your-paperclip.example.com
