@@ -180,6 +180,15 @@ posted, so changing access later does not change earlier reviews.
 Agents then post every review as that user. They still open, comment on and merge pull requests as
 the main account.
 
+### Reach a Forgejo on a private network
+
+If Paperclip reaches Forgejo at a private address, such as `192.168.x.x` or `10.x.x.x`, the plugin
+shows "All resolved IPs … are in private/reserved ranges". Paperclip blocks plugins from private
+addresses and has no setting to allow one.
+
+Turn on **Forgejo is on a private network**. The plugin then calls Forgejo directly instead of
+through Paperclip, so Paperclip's block does not apply.
+
 ### Show the status of Forgejo links
 
 In Paperclip's instance settings, turn on the experimental **External objects** setting. Forgejo
