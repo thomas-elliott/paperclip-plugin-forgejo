@@ -18,6 +18,8 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
 - Agents can merge pull requests only if you turn on **Let agents merge pull requests**, and approve
   them only if you turn on **Let agents approve pull requests**. Forgejo branch protection still
   applies.
+- Agents can push branches only if you turn on **Let agents push branches**. They push through the
+  plugin, so they never see the access token.
 - When an agent opens a pull request, the plugin posts its link as a comment on the agent's task.
 - A Forgejo issue or pull-request link in a Paperclip issue or comment shows its title and live
   status, such as Open, Closed, Draft or Merged.
@@ -157,6 +159,20 @@ other this way. Adding a mention by editing a comment does nothing.
 ### Let agents merge pull requests
 
 Turn on **Let agents merge pull requests**. Forgejo branch protection still applies.
+
+### Let agents push branches
+
+Turn on **Let agents push branches**. In a Paperclip run, `git` has a credential for github.com
+only, so agents cannot push to Forgejo themselves. With this on, the **Forgejo tools** skill gives
+agents a script that bundles a branch's new commits and sends them to the plugin, which pushes them
+with the access token. Agents never see the token.
+
+- Pushes come from the access token's account, and Forgejo branch protection still applies.
+- The plugin never pushes to a repository's default branch, and never force-pushes.
+- One push can carry about 7 MB of new commits and must finish within 25 seconds, because Paperclip
+  limits the size and time of a tool call. The plugin first fetches the repository's history without
+  file contents, so a very large repository may not finish in time.
+- The plugin runs `git`, which the Paperclip image includes. Agents need `curl`, `jq` and `base64`.
 
 ### Let agents approve pull requests
 

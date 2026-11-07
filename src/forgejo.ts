@@ -15,6 +15,7 @@ export type Forgejo = {
   syncIssues: boolean;
   allowMerge: boolean;
   allowApprove: boolean;
+  allowPush: boolean;
   privateNetwork: boolean;
   webhookSecret: EnvSecretRefBinding | null;
 };
@@ -89,6 +90,7 @@ export async function connect(ctx: PluginContext, companyId: string): Promise<Fo
     syncIssues: config.syncIssues === true,
     allowMerge: config.allowMerge === true,
     allowApprove: config.allowApprove === true,
+    allowPush: config.allowPush === true,
     privateNetwork: config.privateNetwork === true,
     webhookSecret: (config.webhookSecret as EnvSecretRefBinding | undefined) ?? null,
   };
