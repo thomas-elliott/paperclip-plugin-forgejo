@@ -165,6 +165,8 @@ export class FakeForgejo {
       return Response.json({ permission: access });
     }
 
+    const repositoryPath = /^\/repos\/([^/]+\/[^/]+)$/.exec(path);
+    if (repositoryPath && this.issues.has(repositoryPath[1])) return Response.json(this.repositoryJson(repositoryPath[1]));
     if (path === "/user/repos") return Response.json(page > 1 ? [] : [...this.issues.keys()].map((name) => this.repositoryJson(name)));
 
     const match = /^\/repos\/([^/]+\/[^/]+)\/(issues|pulls)(?:\/(\d+))?(?:\/(merge|comments|files|labels))?$/.exec(path);
