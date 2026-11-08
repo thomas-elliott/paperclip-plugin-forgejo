@@ -18,8 +18,8 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
 - Agents can merge pull requests only if you turn on **Let agents merge pull requests**, and approve
   them only if you turn on **Let agents approve pull requests**. Forgejo branch protection still
   applies.
-- Agents can push branches only if you turn on **Let agents push branches**. They push through the
-  plugin, so they never see the access token.
+- Agents cannot push through the plugin. To let them push, set up [gitf](#push-with-gitf) on the
+  machine that runs them.
 - When an agent opens a pull request, the plugin posts its link as a comment on the agent's task.
 - A Forgejo issue or pull-request link in a Paperclip issue or comment shows its title and live
   status, such as Open, Closed, Draft or Merged.
@@ -48,6 +48,10 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
   through Paperclip's API instead, as the Forgejo tools skill tells them, so each agent that uses
   Forgejo needs that skill. The tools only work on a task that belongs to a project.
 - A failed tool call still returns HTTP 200 from Paperclip's API, with the reason in `result.error`.
+- Runs that reach Paperclip through its sandbox relay, such as runs on an SSH host, cannot call any
+  plugin tool. The relay forwards only a fixed list of Paperclip's routes, which has no plugin
+  route, and answers `Route not allowed: POST /api/plugins/tools/execute`. Agents in those runs can
+  still push with gitf; see [Push with gitf](#push-with-gitf).
 - Agents act in Forgejo as the user who owns the access token. Forgejo does not let that user
   approve or request changes on pull requests it opened, so one agent cannot approve another
   agent's pull request unless you set a reviewer access token. See
@@ -160,19 +164,61 @@ other this way. Adding a mention by editing a comment does nothing.
 
 Turn on **Let agents merge pull requests**. Forgejo branch protection still applies.
 
-### Let agents push branches
+### Push with gitf
 
-Turn on **Let agents push branches**. In a Paperclip run, `git` has a credential for github.com
-only, so agents cannot push to Forgejo themselves. With this on, the **Forgejo tools** skill gives
-agents a script that bundles a branch's new commits and sends them to the plugin, which pushes them
-with the access token. Agents never see the token.
+gitf is a short script on the machine that runs your agents. It runs git with a Forgejo
+credential, and agents use it instead of `git` to push. It does not need the plugin, so it also
+works for runs that cannot call plugin tools.
 
-- Pushes come from the access token's account, and Forgejo branch protection still applies.
-- The plugin never pushes to a repository's default branch, and never force-pushes.
-- One push can carry about 7 MB of new commits and must finish within 25 seconds, because Paperclip
-  limits the size and time of a tool call. The plugin first fetches the repository's history without
-  file contents, so a very large repository may not finish in time.
-- The plugin runs `git`, which the Paperclip image includes. Agents need `curl`, `jq` and `base64`.
+Every Paperclip run puts Paperclip's own `git` first on `PATH`. That `git` removes every credential
+helper and ignores the machine's git settings, then adds a credential for github.com only. Each run
+also gets a new, empty `HOME`. So a credential set up the usual way never reaches a push. gitf calls
+the machine's real git directly, with the credential on the command line.
+
+Agents can read the credential, because gitf runs as their user. Limit what it can do:
+
+1. Create a Forgejo user for agents, and give it write access only to the repositories agents work on.
+2. Protect each default branch with required approvals, so the agents' user can push branches but
+   not merge them on its own.
+
+Then set up one of these, as the user that runs agents. The examples use `/home/agent`; put gitf in
+a folder on that user's `PATH` that is not inside a run's `HOME`.
+
+**With an access token over HTTPS.** Create an access token for the agents' user with the
+`write:repository` scope, and save it in `/home/agent/.forgejo-token` with mode `0600`. Then
+create `/home/agent/.local/bin/gitf` with mode `0755`, replacing `git.example.com` and
+`agent-user`:
+
+```sh
+#!/bin/sh
+# git with a Forgejo credential. The helper answers only for the Forgejo address, and only
+# answers "get", so a rejected push cannot make git delete the token.
+exec /usr/bin/git \
+  -c 'credential.https://git.example.com.helper=!f() { [ "$1" = get ] && printf "username=agent-user\npassword=%s\n" "$(cat /home/agent/.forgejo-token)"; }; f' \
+  "$@"
+```
+
+**With an SSH key.** Add an SSH key to the agents' Forgejo user, with the private key in
+`/home/agent/.ssh/forgejo` and mode `0600`. Then create `/home/agent/.local/bin/gitf` with mode
+`0755`:
+
+```sh
+#!/bin/sh
+# git with the Forgejo SSH key. Set in the environment, because Paperclip's runs may set
+# GIT_SSH_COMMAND, which takes precedence over git's settings.
+export GIT_SSH_COMMAND='ssh -i /home/agent/.ssh/forgejo -o IdentitiesOnly=yes'
+exec /usr/bin/git "$@"
+```
+
+Tell agents, in their instructions, to push with gitf and to name the repository's address,
+because a workspace may have no remote. Agents that cannot call the plugin cannot open the pull
+request either, so they should report the branch for a person to open one.
+
+```bash
+gitf push https://git.example.com/owner/repo.git my-branch
+```
+
+The HTTPS version is in use with Paperclip. The SSH version has not been tried there yet.
 
 ### Let agents approve pull requests
 

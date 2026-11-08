@@ -191,21 +191,6 @@ const tools: PluginToolDeclaration[] = [
     parametersSchema: { type: "object", required: ["number"], properties: { repository, number } },
   },
   {
-    name: "push_branch",
-    displayName: "Push a branch to Forgejo",
-    description:
-      "Pushes a branch to Forgejo as the plugin's account. Meant for the forgejo-push script in the Forgejo tools skill, which makes the bundle. Will not push to the default branch or replace commits already on the branch. Fails unless the operator has let agents push in the plugin settings.",
-    parametersSchema: {
-      type: "object",
-      required: ["branch", "bundle"],
-      properties: {
-        repository,
-        branch: { type: "string", description: "Branch to create or update in Forgejo." },
-        bundle: { type: "string", description: "A git bundle of that one branch, base64-encoded, holding the commits Forgejo lacks." },
-      },
-    },
-  },
-  {
     name: "merge_pull_request",
     displayName: "Merge a Forgejo pull request",
     description: "Merges a Forgejo pull request. Fails unless the operator has let agents merge in the plugin settings.",
@@ -285,13 +270,6 @@ const manifest: PaperclipPluginManifestV1 = {
         default: false,
         title: "Let agents approve pull requests",
         description: "Agents can always comment on a pull request or request changes. Forgejo branch protection decides whether an approval counts.",
-      },
-      allowPush: {
-        type: "boolean",
-        default: false,
-        title: "Let agents push branches",
-        description:
-          "Agents push through the plugin, as the access token's account, without seeing the token. They cannot push to a repository's default branch. Forgejo branch protection still applies.",
       },
       privateNetwork: {
         type: "boolean",
