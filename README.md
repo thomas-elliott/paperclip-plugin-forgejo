@@ -18,8 +18,9 @@ pull requests, shows the live status of Forgejo links, and can import Forgejo is
 - Agents can merge pull requests only if you turn on **Let agents merge pull requests**, and approve
   them only if you turn on **Let agents approve pull requests**. Forgejo branch protection still
   applies.
-- Agents cannot push through the plugin. To let them push, set up [gitf](#push-with-gitf) on the
-  machine that runs them.
+- The **Forgejo tools** skill tells agents to push, and to open a pull request when they cannot call
+  the plugin, with gitf, a short script you set up on the machine that runs them. See
+  [Push with gitf](#push-with-gitf).
 - When an agent opens a pull request, the plugin posts its link as a comment on the agent's task.
 - A Forgejo issue or pull-request link in a Paperclip issue or comment shows its title and live
   status, such as Open, Closed, Draft or Merged.
@@ -181,8 +182,9 @@ Agents can read the credential, because gitf runs as their user. Limit what it c
 2. Protect each default branch with required approvals, so the agents' user can push branches but
    not merge them on its own.
 
-Then set up one of these, as the user that runs agents. The examples use `/home/agent`; put gitf in
-a folder on that user's `PATH` that is not inside a run's `HOME`.
+Then set up one of these, as the user that runs agents. The examples use `/home/agent`. The skill
+calls the script `gitf`, so put it in a folder on that user's `PATH` that is not inside a run's
+`HOME`.
 
 **With an access token over HTTPS.** Create an access token for the agents' user with the
 `write:repository` scope, and save it in `/home/agent/.forgejo-token` with mode `0600`. Then
@@ -210,23 +212,23 @@ export GIT_SSH_COMMAND='ssh -i /home/agent/.ssh/forgejo -o IdentitiesOnly=yes'
 exec /usr/bin/git "$@"
 ```
 
-Tell agents, in their instructions, to push with gitf and to name the repository's address,
-because a workspace may have no remote:
+The **Forgejo tools** skill tells agents to push with gitf, naming the repository's address:
 
 ```bash
 gitf push https://git.example.com/owner/repo.git my-branch
 ```
 
-Agents that cannot call the plugin can still open a pull request with gitf, by pushing to
-`refs/for/<base branch>` (Forgejo's AGit flow). Forgejo opens a pull request from the pushed
-commits, with the title and description given as push options:
+Agents that cannot call the plugin open the pull request by pushing to `refs/for/<base branch>`
+(Forgejo's AGit flow), with the title and description as push options. The pull request's author is
+the account that owns the credential:
 
 ```bash
 gitf push https://git.example.com/owner/repo.git HEAD:refs/for/main \
   -o topic=my-branch -o title="Add paging to the library" -o description="What changed and why."
 ```
 
-The pull request's author is the account that owns the credential.
+Without gitf, the skill tells agents to say that pushing is not set up, rather than look for a
+credential.
 
 The HTTPS version, including opening a pull request by pushing, is in use with Paperclip. The SSH
 version has not been tried there yet.
