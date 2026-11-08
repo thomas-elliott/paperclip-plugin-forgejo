@@ -1,18 +1,10 @@
-import { execFile } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Agent, Issue, PluginWorkspace, Project, ToolResult } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
 import { BASE_URL, FakeForgejo } from "./fake-forgejo.js";
-import { commitFile, git, GitServer } from "./git-server.js";
 
 const config = { baseUrl: `${BASE_URL}/`, token: "token-ref", webhookSecret: "hook-ref", syncIssues: true };
 
@@ -32,7 +24,6 @@ async function setUp(pluginConfig: Record<string, unknown>, repositories: string
 }
 
 const runCtx = { companyId: "co-1", projectId: "project-1" };
-const execFileAsync = promisify(execFile);
 
 // Several companies, each with its own settings and a project "project-<company>" using me/app.
 // The harness serves one config to every company, so this stands in for Paperclip's per-company
@@ -336,135 +327,6 @@ describe("agent tools", () => {
 
     const merged = await (await setUp({ ...config, allowMerge: true }, ["me/app"])).executeTool<ToolResult>("merge_pull_request", { number: 7 }, runCtx);
     expect(merged.data).toMatchObject({ merged: true });
-  });
-});
-
-describe("pushing a branch", () => {
-  // The harness resolves the token secret to "resolved:token-ref", whose account the fake calls "someone".
-  let server: GitServer;
-  let pushConfig: Record<string, unknown>;
-  let work: string;
-  beforeEach(async () => {
-    server = new GitServer("someone", "resolved:token-ref");
-    await server.start();
-    pushConfig = { ...config, baseUrl: server.url, allowPush: true };
-    work = server.createRepository("me/app");
-  });
-  afterEach(() => server.stop());
-
-  // A bundle of the branch's commits that Forgejo lacks, base64-encoded, as the skill's script makes it.
-  function bundleOf(branch: string, ...exclude: string[]) {
-    git(work, "bundle", "create", "--quiet", "push.bundle", `refs/heads/${branch}`, ...exclude.map((commit) => `^${commit}`));
-    return readFileSync(join(work, "push.bundle")).toString("base64");
-  }
-
-  it("pushes the new commits on a branch as the access token's account", async () => {
-    new FakeForgejo(["me/app"]);
-    const main = git(work, "rev-parse", "main");
-    git(work, "switch", "--quiet", "-c", "feature");
-    commitFile(work, "a.txt", "one\n");
-    const head = commitFile(work, "b.txt", "two\n");
-
-    const harness = await setUp(pushConfig, ["me/app"]);
-    const result = await harness.executeTool<ToolResult>("push_branch", { branch: "feature", bundle: bundleOf("feature", main) }, runCtx);
-
-    expect(result.error).toBeUndefined();
-    expect(result.data).toEqual({ repository: "me/app", branch: "feature", commit: head });
-    expect(server.branchCommit("me/app", "feature")).toBe(head);
-  });
-
-  it("adds commits to a branch it pushed before, but will not replace them", async () => {
-    new FakeForgejo(["me/app"]);
-    const harness = await setUp(pushConfig, ["me/app"]);
-    const main = git(work, "rev-parse", "main");
-    git(work, "switch", "--quiet", "-c", "feature");
-    const first = commitFile(work, "a.txt", "one\n");
-    await harness.executeTool<ToolResult>("push_branch", { branch: "feature", bundle: bundleOf("feature", main) }, runCtx);
-
-    const second = commitFile(work, "a.txt", "two\n");
-    const added = await harness.executeTool<ToolResult>("push_branch", { branch: "feature", bundle: bundleOf("feature", first) }, runCtx);
-    expect(added.error).toBeUndefined();
-    expect(server.branchCommit("me/app", "feature")).toBe(second);
-
-    git(work, "reset", "--quiet", "--hard", main);
-    commitFile(work, "a.txt", "rewritten\n");
-    const replaced = await harness.executeTool<ToolResult>("push_branch", { branch: "feature", bundle: bundleOf("feature", main) }, runCtx);
-    expect(replaced.error).toContain("rejected");
-    expect(server.branchCommit("me/app", "feature")).toBe(second);
-  });
-
-  it("pushes with the script in the skill, which bundles only the commits Forgejo lacks", async () => {
-    const forgejo = new FakeForgejo(["me/app"]);
-    const main = git(work, "rev-parse", "main");
-    forgejo.branches.set("me/app", [{ name: "main", sha: main }]);
-    git(work, "switch", "--quiet", "-c", "feature");
-    const head = commitFile(work, "a.txt", "one\n");
-    const harness = await setUp(pushConfig, ["me/app"]);
-
-    // Stands in for the two Paperclip API routes the script calls.
-    const pushed: { tool: string; bundle?: string }[] = [];
-    const api = createServer(async (request, response) => {
-      let body = "";
-      for await (const chunk of request) body += chunk;
-      if (request.url === "/api/issues/task-1") return void response.end(JSON.stringify({ projectId: "project-1" }));
-      const { tool, parameters, runContext } = JSON.parse(body);
-      pushed.push({ tool, bundle: parameters.bundle });
-      const result = await harness.executeTool(tool.replace(`${manifest.id}:`, ""), parameters, runContext);
-      response.end(JSON.stringify({ result }));
-    });
-    await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
-    const home = mkdtempSync(join(tmpdir(), "agent-home-"));
-    try {
-      const { skill } = await harness.ctx.skills.managed.get("forgejo-tools", "co-1");
-      const setUpScript = /cat > "\$HOME\/forgejo-push"[\s\S]*?chmod 700 "\$HOME\/forgejo-push"/.exec(skill!.markdown)![0];
-      const env = {
-        PATH: process.env.PATH,
-        HOME: home,
-        PAPERCLIP_API_URL: `http://127.0.0.1:${(api.address() as AddressInfo).port}/api/`,
-        PAPERCLIP_API_KEY: "agent-key",
-        PAPERCLIP_TASK_ID: "task-1",
-        PAPERCLIP_RUN_ID: "run-1",
-        PAPERCLIP_AGENT_ID: "agent-1",
-        PAPERCLIP_COMPANY_ID: "co-1",
-      };
-      await execFileAsync("sh", ["-c", setUpScript], { env });
-      const { stdout } = await execFileAsync(join(home, "forgejo-push"), ["feature"], { cwd: work, env });
-
-      expect(JSON.parse(stdout)).toEqual({ repository: "me/app", branch: "feature", commit: head });
-      expect(server.branchCommit("me/app", "feature")).toBe(head);
-      expect(pushed.map(({ tool }) => tool)).toEqual([`${manifest.id}:list_branches`, `${manifest.id}:push_branch`]);
-      // The bundle builds on main rather than carrying it.
-      writeFileSync(join(home, "sent.bundle"), Buffer.from(pushed[1].bundle!, "base64"));
-      expect(git(work, "bundle", "verify", join(home, "sent.bundle"))).toContain(main);
-    } finally {
-      api.close();
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("refuses to push to the default branch", async () => {
-    new FakeForgejo(["me/app"]);
-    const main = git(work, "rev-parse", "main");
-    commitFile(work, "a.txt", "one\n");
-
-    const harness = await setUp(pushConfig, ["me/app"]);
-    const result = await harness.executeTool<ToolResult>("push_branch", { branch: "main", bundle: bundleOf("main", main) }, runCtx);
-
-    expect(result.error).toContain("default branch");
-    expect(server.branchCommit("me/app", "main")).toBe(main);
-  });
-
-  it("refuses to push until pushing is allowed in the settings", async () => {
-    new FakeForgejo(["me/app"]);
-    const main = git(work, "rev-parse", "main");
-    git(work, "switch", "--quiet", "-c", "feature");
-    commitFile(work, "a.txt", "one\n");
-
-    const harness = await setUp({ ...pushConfig, allowPush: false }, ["me/app"]);
-    const result = await harness.executeTool<ToolResult>("push_branch", { branch: "feature", bundle: bundleOf("feature", main) }, runCtx);
-
-    expect(result.error).toContain("Pushing is turned off");
-    expect(server.branchCommit("me/app", "feature")).toBeNull();
   });
 });
 

@@ -16,7 +16,6 @@ import {
   type ForgejoPullRequestJson,
   type ForgejoRepositoryJson,
 } from "./forgejo.js";
-import { pushBundle } from "./git-push.js";
 
 type Input = {
   repository?: string;
@@ -34,8 +33,6 @@ type Input = {
   event?: string;
   commit?: string;
   ref?: string;
-  branch?: string;
-  bundle?: string;
   // Checked in the tools that take them, since Paperclip does not check inputs against the schema.
   labels?: unknown;
   assignees?: unknown;
@@ -461,22 +458,6 @@ const tools: Record<string, Tool> = {
         url: status.target_url,
       })),
     };
-  },
-
-  async push_branch({ ctx, forgejo, repository, input }) {
-    if (!forgejo.allowPush) {
-      throw new Error("Pushing is turned off. An operator can allow it in the Forgejo plugin settings; until then, ask a person to push.");
-    }
-    if (typeof input.branch !== "string" || typeof input.bundle !== "string") throw new Error("branch and bundle must be text.");
-    const name = await repository();
-    // Changes reach the default branch through pull requests, whatever branch protection allows the account.
-    const { default_branch } = await forgejoJson<ForgejoRepositoryJson>(ctx, forgejo, `/repos/${name}`);
-    if (input.branch === default_branch) {
-      throw new Error(`${default_branch} is ${name}'s default branch. Push to a branch of your own, then open a pull request.`);
-    }
-    const { login } = await forgejoJson<{ login: string }>(ctx, forgejo, "/user");
-    const commit = await pushBundle(forgejo, login, name, input.branch, Buffer.from(input.bundle, "base64"));
-    return { repository: name, branch: input.branch, commit };
   },
 
   async merge_pull_request({ ctx, forgejo, repository, input }) {
