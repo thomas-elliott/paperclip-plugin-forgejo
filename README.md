@@ -211,14 +211,25 @@ exec /usr/bin/git "$@"
 ```
 
 Tell agents, in their instructions, to push with gitf and to name the repository's address,
-because a workspace may have no remote. Agents that cannot call the plugin cannot open the pull
-request either, so they should report the branch for a person to open one.
+because a workspace may have no remote:
 
 ```bash
 gitf push https://git.example.com/owner/repo.git my-branch
 ```
 
-The HTTPS version is in use with Paperclip. The SSH version has not been tried there yet.
+Agents that cannot call the plugin can still open a pull request with gitf, by pushing to
+`refs/for/<base branch>` (Forgejo's AGit flow). Forgejo opens a pull request from the pushed
+commits, with the title and description given as push options:
+
+```bash
+gitf push https://git.example.com/owner/repo.git HEAD:refs/for/main \
+  -o topic=my-branch -o title="Add paging to the library" -o description="What changed and why."
+```
+
+The pull request's author is the account that owns the credential.
+
+The HTTPS version, including opening a pull request by pushing, is in use with Paperclip. The SSH
+version has not been tried there yet.
 
 ### Let agents approve pull requests
 
